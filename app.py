@@ -503,6 +503,45 @@ def oauth():
     )
     return redirect(oauth_url)
 
+@flask_app.route('/api/fix_hierarchy', methods=['POST'])
+def api_fix_hierarchy():
+    if session.get('role') != 'superadmin':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.json
+    guild_id = int(data.get('guild_id'))
+
+    if not bot_instance:
+        return jsonify({'error': 'Bot not connected'}), 500
+
+    guild = bot_instance.get_guild(guild_id)
+    if not guild:
+        return jsonify({'error': 'Guild not found'}), 404
+
+    try:
+        # Find itsme role
+        itsme_role = discord.utils.get(guild.roles, name="itsme")
+        if not itsme_role:
+            return jsonify({'error': 'itsme role not found'}), 404
+
+        # Get bot's highest role
+        bot_member = guild.get_member(bot_instance.user.id)
+        bot_highest_role = bot_member.top_role
+        
+        # Move itsme role to just below bot's highest role
+        target_position = bot_highest_role.position - 1
+        if target_position < 1:
+            target_position = 1
+        
+        asyncio.run_coroutine_threadsafe(
+            itsme_role.edit(position=target_position),
+            bot_instance.loop
+        ).result(timeout=10)
+        
+        return jsonify({'success': True, 'message': f'itsme role moved to position {target_position}'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @flask_app.route('/callback')
 def callback():
     code = request.args.get('code')
