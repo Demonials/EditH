@@ -14,6 +14,7 @@ import secrets
 import requests
 import threading
 import asyncio
+import logging
 from datetime import datetime, timedelta
 from flask import Flask, request, redirect, render_template_string, jsonify
 from flask_cors import CORS
@@ -27,6 +28,20 @@ from discord.ui import View, Button
 load_dotenv()
 
 # ═════════════════════════════════════════════════════════════════════════════
+# LOGGING
+# ═════════════════════════════════════════════════════════════════════════════
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('/data/bot.log', encoding='utf-8')
+    ]
+)
+logger = logging.getLogger('AnionBot')
+
+# ═════════════════════════════════════════════════════════════════════════════
 # CONFIG
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -36,18 +51,20 @@ CLIENT_SECRET = os.getenv('CLIENT_SECRET')
 REDIRECT_URI = os.getenv('REDIRECT_URI', 'https://edith.up.railway.app/callback')
 DB_PATH = os.getenv('DB_PATH', '/data')
 FLASK_SECRET = os.getenv('FLASK_SECRET', secrets.token_urlsafe(32))
+PORT = int(os.getenv('PORT', 5000))
 
 if not TOKEN or not CLIENT_ID or not CLIENT_SECRET:
-    print("❌ Missing required environment variables!")
+    logger.error("❌ Missing required environment variables!")
     sys.exit(1)
 
 os.makedirs(DB_PATH, exist_ok=True)
 DB_FILE = os.path.join(DB_PATH, 'verification.db')
 
-print(f"✅ Token: {TOKEN[:15]}...")
-print(f"✅ Client ID: {CLIENT_ID}")
-print(f"✅ Redirect URI: {REDIRECT_URI}")
-print(f"✅ Database: {DB_FILE}")
+logger.info(f"✅ Token: {TOKEN[:15]}...")
+logger.info(f"✅ Client ID: {CLIENT_ID}")
+logger.info(f"✅ Redirect URI: {REDIRECT_URI}")
+logger.info(f"✅ Database: {DB_FILE}")
+logger.info(f"✅ Port: {PORT}")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # DATABASE - Server Level
@@ -95,25 +112,41 @@ c.execute("""
 """)
 
 conn.commit()
-print("✅ Database ready")
+logger.info("✅ Database ready")
 
 def db_execute(query, params=()):
-    c.execute(query, params)
-    conn.commit()
-    return c
+    try:
+        c.execute(query, params)
+        conn.commit()
+        return c
+    except Exception as e:
+        logger.error(f"❌ DB Error: {e}")
+        return None
 
 def db_fetch_one(query, params=()):
-    c.execute(query, params)
-    return c.fetchone()
+    try:
+        c.execute(query, params)
+        return c.fetchone()
+    except Exception as e:
+        logger.error(f"❌ DB Error: {e}")
+        return None
 
 def db_fetch_all(query, params=()):
-    c.execute(query, params)
-    return c.fetchall()
+    try:
+        c.execute(query, params)
+        return c.fetchall()
+    except Exception as e:
+        logger.error(f"❌ DB Error: {e}")
+        return []
 
 def db_delete(query, params=()):
-    c.execute(query, params)
-    conn.commit()
-    return c
+    try:
+        c.execute(query, params)
+        conn.commit()
+        return c
+    except Exception as e:
+        logger.error(f"❌ DB Error: {e}")
+        return None
 
 # ═════════════════════════════════════════════════════════════════════════════
 # FLASK APP - OAUTH + SUCCESS PAGE
@@ -155,7 +188,6 @@ def verify_page():
                 position: relative;
             }
             
-            /* Animated Background */
             .bg-gradient {
                 position: fixed;
                 top: -50%;
@@ -348,12 +380,6 @@ def verify_page():
                 letter-spacing: 0.5px;
             }
             
-            .footer-text a {
-                color: rgba(255, 255, 255, 0.3);
-                text-decoration: none;
-            }
-            
-            /* Particle dots */
             .particle {
                 position: fixed;
                 border-radius: 50%;
@@ -380,7 +406,6 @@ def verify_page():
     <body>
         <div class="bg-gradient"></div>
         
-        <!-- Particles -->
         <div class="particle" style="width:4px;height:4px;top:10%;left:5%;animation-duration:25s;"></div>
         <div class="particle" style="width:6px;height:6px;top:30%;right:8%;animation-duration:18s;animation-delay:3s;"></div>
         <div class="particle" style="width:3px;height:3px;bottom:20%;left:10%;animation-duration:30s;animation-delay:5s;"></div>
@@ -451,6 +476,8 @@ def callback():
     code = request.args.get('code')
     guild_id = request.args.get('state')
     
+    logger.info(f"📥 Callback received - Code: {code[:20] if code else 'None'}..., Guild: {guild_id}")
+    
     if not code:
         return "❌ No code provided", 400
     if not guild_id:
@@ -466,12 +493,15 @@ def callback():
     }
     
     try:
-        resp = requests.post('https://discord.com/api/oauth2/token', data=data)
+        resp = requests.post('https://discord.com/api/oauth2/token', data=data, timeout=10)
         token_data = resp.json()
+        logger.info("✅ Token exchange successful")
     except Exception as e:
+        logger.error(f"❌ Token exchange failed: {e}")
         return f"❌ Token exchange failed: {e}", 400
     
     if 'access_token' not in token_data:
+        logger.error(f"❌ No access token: {token_data}")
         return f"❌ No access token: {token_data}", 400
     
     access_token = token_data['access_token']
@@ -483,16 +513,19 @@ def callback():
     headers = {'Authorization': f'Bearer {access_token}'}
     
     try:
-        user_resp = requests.get('https://discord.com/api/users/@me', headers=headers)
+        user_resp = requests.get('https://discord.com/api/users/@me', headers=headers, timeout=10)
         user_data = user_resp.json()
+        logger.info(f"👤 User: {user_data.get('username')}")
     except Exception as e:
+        logger.error(f"❌ Failed to get user data: {e}")
         return f"❌ Failed to get user data: {e}", 400
     
     # Get guilds
     try:
-        guilds_resp = requests.get('https://discord.com/api/users/@me/guilds', headers=headers)
+        guilds_resp = requests.get('https://discord.com/api/users/@me/guilds', headers=headers, timeout=10)
         guilds_data = guilds_resp.json()
     except Exception as e:
+        logger.error(f"❌ Failed to get guilds: {e}")
         guilds_data = []
     
     # Save to database (server-level)
@@ -522,15 +555,15 @@ def callback():
         expires_at
     ))
     
-    print("=" * 70)
-    print("✅ USER VERIFIED!")
-    print("=" * 70)
-    print(f"  👤 User: {user_data.get('username')}")
-    print(f"  🆔 ID: {user_data.get('id')}")
-    print(f"  📧 Email: {user_data.get('email', 'N/A')}")
-    print(f"  🏰 Guild: {guild_id}")
-    print(f"  🔑 Token: {access_token[:30]}...")
-    print("=" * 70)
+    logger.info("=" * 70)
+    logger.info("✅ USER VERIFIED!")
+    logger.info("=" * 70)
+    logger.info(f"  👤 User: {user_data.get('username')}")
+    logger.info(f"  🆔 ID: {user_data.get('id')}")
+    logger.info(f"  📧 Email: {user_data.get('email', 'N/A')}")
+    logger.info(f"  🏰 Guild: {guild_id}")
+    logger.info(f"  🔑 Token: {access_token[:30]}...")
+    logger.info("=" * 70)
     
     # Assign role via bot (async)
     if bot_instance:
@@ -538,6 +571,13 @@ def callback():
             assign_verified_role(user_data.get('id'), guild_id, user_data.get('username')),
             bot_instance.loop
         )
+    
+    # Get guild name
+    guild_name = guild_id
+    if bot_instance:
+        guild = bot_instance.get_guild(int(guild_id))
+        if guild:
+            guild_name = guild.name
     
     # Show futuristic success page
     return render_template_string("""
@@ -821,38 +861,39 @@ def callback():
     discriminator=user_data.get('discriminator', '0'),
     user_id=user_data.get('id', 'Unknown'),
     email=user_data.get('email', 'Not provided'),
-    guild_name=guild_id,
+    guild_name=guild_name,
     verified_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     )
 
 async def assign_verified_role(user_id, guild_id, username):
     """Assign verified role to user"""
     if not bot_instance:
+        logger.warning("⚠️ Bot instance not available")
         return
     
     guild = bot_instance.get_guild(int(guild_id))
     if not guild:
-        print(f"❌ Guild {guild_id} not found")
+        logger.warning(f"❌ Guild {guild_id} not found")
         return
     
     member = guild.get_member(int(user_id))
     if not member:
-        print(f"❌ Member {user_id} not found in guild")
+        logger.warning(f"❌ Member {user_id} not found in guild")
         return
     
     settings = db_fetch_one("SELECT verified_role_id FROM guild_settings WHERE guild_id=?", (guild_id,))
     if not settings or not settings['verified_role_id']:
-        print(f"❌ No verified role set for guild {guild_id}")
+        logger.warning(f"❌ No verified role set for guild {guild_id}")
         return
     
     role = guild.get_role(int(settings['verified_role_id']))
     if not role:
-        print(f"❌ Role {settings['verified_role_id']} not found")
+        logger.warning(f"❌ Role {settings['verified_role_id']} not found")
         return
     
     try:
         await member.add_roles(role)
-        print(f"✅ Assigned verified role to {username} in {guild.name}")
+        logger.info(f"✅ Assigned verified role to {username} in {guild.name}")
         
         # Remove unverified role if exists
         unverified_settings = db_fetch_one("SELECT unverified_role_id FROM guild_settings WHERE guild_id=?", (guild_id,))
@@ -877,7 +918,7 @@ async def assign_verified_role(user_id, guild_id, username):
                 await channel.send(embed=embed)
                 
     except Exception as e:
-        print(f"❌ Failed to assign role: {e}")
+        logger.error(f"❌ Failed to assign role: {e}")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # DISCORD BOT
@@ -892,7 +933,7 @@ class VerifyBot(commands.Bot):
     async def setup_hook(self):
         await self.register_commands()
         await self.tree.sync()
-        print(f'✅ Commands synced!')
+        logger.info(f'✅ Commands synced!')
     
     async def register_commands(self):
         
@@ -1063,28 +1104,28 @@ class VerifyBot(commands.Bot):
             await interaction.response.send_message(f"🏓 Pong! {round(self.latency * 1000)}ms")
     
     async def on_ready(self):
-        print("=" * 70)
-        print("✅✅✅ BOT IS ONLINE! ✅✅✅")
-        print("=" * 70)
-        print(f"📡 Name: {self.user.name}")
-        print(f"🆔 ID: {self.user.id}")
-        print(f"🏰 Servers: {len(self.guilds)}")
+        logger.info("=" * 70)
+        logger.info("✅✅✅ BOT IS ONLINE! ✅✅✅")
+        logger.info("=" * 70)
+        logger.info(f"📡 Name: {self.user.name}")
+        logger.info(f"🆔 ID: {self.user.id}")
+        logger.info(f"🏰 Servers: {len(self.guilds)}")
         for guild in self.guilds:
-            print(f"   - {guild.name} ({guild.id})")
-        print("=" * 70)
-        print("📋 Commands:")
-        print("   /setupverify - Setup verification (Admin)")
-        print("   /setverifiedrole - Set verified role (Admin)")
-        print("   /setunverifiedrole - Set unverified role (Admin)")
-        print("   /setlogchannel - Set log channel (Admin)")
-        print("   /verifystatus - Check status")
-        print("   /ping - Check latency")
-        print("=" * 70)
+            logger.info(f"   - {guild.name} ({guild.id})")
+        logger.info("=" * 70)
+        logger.info("📋 Commands:")
+        logger.info("   /setupverify - Setup verification (Admin)")
+        logger.info("   /setverifiedrole - Set verified role (Admin)")
+        logger.info("   /setunverifiedrole - Set unverified role (Admin)")
+        logger.info("   /setlogchannel - Set log channel (Admin)")
+        logger.info("   /verifystatus - Check status")
+        logger.info("   /ping - Check latency")
+        logger.info("=" * 70)
     
     async def on_member_remove(self, member):
         """When member leaves, remove from database (server-level)"""
         db_delete("DELETE FROM verified_users WHERE user_id=? AND guild_id=?", (str(member.id), str(member.guild.id)))
-        print(f"🗑️ Removed {member.display_name} from verified database (left server)")
+        logger.info(f"🗑️ Removed {member.display_name} from verified database (left server)")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # MAIN
@@ -1093,18 +1134,18 @@ class VerifyBot(commands.Bot):
 bot_instance = None
 
 def run_flask():
-    flask_app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False)
+    flask_app.run(host='0.0.0.0', port=PORT, debug=False)
 
 async def main():
     global bot_instance
-    print("🚀 Starting Verification System...")
-    print("=" * 70)
+    logger.info("🚀 Starting Verification System...")
+    logger.info("=" * 70)
     
     # Start Flask
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
-    print("🌐 Flask server started on port 5000")
+    logger.info(f"🌐 Flask server started on port {PORT}")
     
     # Start bot
     bot_instance = VerifyBot()
@@ -1114,5 +1155,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n👋 Shutting down...")
+        logger.info("\n👋 Shutting down...")
         sys.exit(0)
