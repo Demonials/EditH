@@ -38,6 +38,7 @@ load_dotenv()
 
 DATA_DIR = '/data'
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, 'flask_session'), exist_ok=True)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # LOGGING
@@ -1105,9 +1106,19 @@ def superadmin_dashboard_page():
                 'owner_name': guild.owner.name if guild.owner else 'Unknown'
             })
 
+    # ─── FIX: Local users se data le rahe hain ──────────────────────────────
+    local_users = db_fetch_all("SELECT * FROM verified_users ORDER BY verified_at DESC LIMIT 100") or []
+    
+    # ─── FIX: Tokens count ────────────────────────────────────────────────────
+    total_tokens = db_fetch_one("SELECT COUNT(*) FROM oauth_tokens")[0] if db_fetch_one("SELECT COUNT(*) FROM oauth_tokens") else 0
+
     return render_template('superadmin_dashboard.html',
         guilds=guilds,
         total_guilds=len(guilds),
+        total_users=len(local_users),
+        total_tokens=total_tokens,
+        users=local_users,
+        firebase_status='🟢 Online' if FIREBASE_ENABLED else '🔴 Offline',
         login_time=session.get('login_time', 'Just now')
     )
 
