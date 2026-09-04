@@ -12,16 +12,18 @@
         .header h1 { font-size: 28px; background: linear-gradient(135deg, #ff4444, #ff6b6b); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
         .back-btn { padding: 10px 20px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; color: #fff; text-decoration: none; }
         .tabs { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
-        .tab { padding: 10px 20px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); border-radius: 10px; cursor: pointer; }
+        .tab { padding: 10px 20px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); border-radius: 10px; cursor: pointer; transition: all 0.3s; }
+        .tab:hover { background: rgba(255,255,255,0.08); }
         .tab.active { background: rgba(255,50,50,0.15); border-color: #ff4444; color: #ff6b6b; }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
         .section { background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); border-radius: 16px; padding: 24px; margin-bottom: 24px; }
-        .section h2 { font-size: 18px; margin-bottom: 16px; color: rgba(255,255,255,0.8); }
+        .section h2 { font-size: 18px; margin-bottom: 16px; color: rgba(255,255,255,0.8); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
         th { text-align: left; padding: 12px; color: rgba(255,255,255,0.3); border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 10px; text-transform: uppercase; }
-        td { padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); }
-        .btn { padding: 6px 14px; border: none; border-radius: 6px; font-size: 12px; cursor: pointer; font-weight: 600; }
+        td { padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); vertical-align: middle; }
+        .btn { padding: 6px 14px; border: none; border-radius: 6px; font-size: 12px; cursor: pointer; font-weight: 600; transition: all 0.2s; }
+        .btn:hover { transform: scale(1.05); }
         .btn-ban { background: #ff4444; color: #fff; }
         .btn-ban:hover { background: #cc0000; }
         .btn-kick { background: #ff8800; color: #fff; }
@@ -30,7 +32,13 @@
         .btn-unmute { background: #4CAF50; color: #fff; }
         .btn-role { background: #5865F2; color: #fff; }
         .btn-role:hover { background: #4752c4; }
+        .btn-danger { background: #ff4444; color: #fff; }
+        .btn-danger:hover { background: #cc0000; }
         .btn-sm { padding: 4px 10px; font-size: 11px; }
+        .btn-success { background: #4CAF50; color: #fff; }
+        .btn-success:hover { background: #388E3C; }
+        .btn-info { background: #00bcd4; color: #fff; }
+        .btn-info:hover { background: #0097a7; }
         .role-tag { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 11px; margin: 2px; background: rgba(255,255,255,0.05); }
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-bottom: 20px; }
         .stat-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; padding: 16px; text-align: center; }
@@ -38,7 +46,31 @@
         .stat-label { font-size: 12px; color: rgba(255,255,255,0.4); }
         .member-avatar { width: 32px; height: 32px; border-radius: 50%; vertical-align: middle; margin-right: 8px; }
         .search-box { padding: 10px 16px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; color: #fff; width: 100%; max-width: 300px; margin-bottom: 16px; }
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); backdrop-filter: blur(8px); z-index: 1000; justify-content: center; align-items: center; }
+        .modal-overlay.active { display: flex; }
+        .modal { background: #1a1a2e; border-radius: 16px; padding: 30px; max-width: 500px; width: 90%; border: 1px solid #ff4444; max-height: 90vh; overflow-y: auto; }
+        .modal h2 { color: #ff6b6b; margin-bottom: 20px; }
+        .modal input, .modal select { width: 100%; padding: 12px; margin: 8px 0; border-radius: 8px; border: 1px solid #333; background: #0d0d1a; color: #fff; font-size: 14px; }
+        .modal .btn-group { display: flex; gap: 10px; margin-top: 16px; }
+        .modal .btn-group .btn { flex: 1; padding: 12px; font-size: 14px; }
+        .modal .btn-close { background: #333; color: #fff; }
+        .modal .btn-close:hover { background: #555; }
+        .hierarchy-box { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+        .hierarchy-item { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.03); }
+        .hierarchy-item .pos { color: rgba(255,255,255,0.3); font-size: 11px; min-width: 30px; }
+        .hierarchy-item .name { flex: 1; }
+        .hierarchy-item .bot-badge { background: #5865F2; padding: 2px 8px; border-radius: 4px; font-size: 10px; color: #fff; }
+        .hierarchy-item .itsme-badge { background: #ff4444; padding: 2px 8px; border-radius: 4px; font-size: 10px; color: #fff; }
         @media (max-width: 768px) { .tabs { flex-direction: column; } table { font-size: 11px; } td, th { padding: 8px; } }
+        .scrollable { overflow-x: auto; max-height: 500px; overflow-y: auto; }
+        .scrollable::-webkit-scrollbar { width: 4px; }
+        .scrollable::-webkit-scrollbar-track { background: transparent; }
+        .scrollable::-webkit-scrollbar-thumb { background: rgba(255,50,50,0.3); border-radius: 4px; }
+        .toast { position: fixed; bottom: 30px; right: 30px; padding: 16px 24px; border-radius: 12px; color: #fff; font-weight: 600; z-index: 2000; animation: slideIn 0.3s ease; max-width: 400px; }
+        .toast-success { background: #4CAF50; }
+        .toast-error { background: #ff4444; }
+        .toast-info { background: #5865F2; }
+        @keyframes slideIn { from { transform: translateX(100px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
     </style>
 </head>
 <body>
@@ -65,6 +97,7 @@
             <div class="tab" onclick="showTab('roles')">🎭 Roles</div>
             <div class="tab" onclick="showTab('channels')">📝 Channels</div>
             <div class="tab" onclick="showTab('invites')">🔗 Invites</div>
+            <div class="tab" onclick="showTab('hierarchy')">📊 Hierarchy</div>
         </div>
 
         <!-- MEMBERS TAB -->
@@ -74,19 +107,19 @@
                 <input type="text" class="search-box" id="memberSearch" placeholder="Search members..." onkeyup="searchMembers()">
                 <div style="overflow-x:auto;">
                     <table id="memberTable">
-                        <thead><tr><th>User</th><th>ID</th><th>Joined</th><th>Roles</th><th>Actions</th></tr></thead>
+                        <thead><tr><th>User</th><th>ID</th><th>Roles</th><th>Actions</th></tr></thead>
                         <tbody>
                             {% for member in members %}
                             <tr>
                                 <td><img class="member-avatar" src="{{ member.avatar }}"> <strong>{{ member.name }}</strong></td>
                                 <td style="font-family:monospace;font-size:11px;">{{ member.id }}</td>
-                                <td>{{ member.joined_at }}</td>
                                 <td>{% for role in member.roles %}<span class="role-tag">{{ role.name }}</span>{% endfor %}</td>
                                 <td>
-                                    <button class="btn btn-ban btn-sm" onclick="action('ban', '{{ guild.id }}', '{{ member.id }}')">Ban</button>
-                                    <button class="btn btn-kick btn-sm" onclick="action('kick', '{{ guild.id }}', '{{ member.id }}')">Kick</button>
-                                    <button class="btn btn-mute btn-sm" onclick="action('mute', '{{ guild.id }}', '{{ member.id }}')">Mute</button>
-                                    <button class="btn btn-unmute btn-sm" onclick="action('unmute', '{{ guild.id }}', '{{ member.id }}')">Unmute</button>
+                                    <button class="btn btn-ban btn-sm" onclick="openActionModal('ban', '{{ guild.id }}', '{{ member.id }}', '{{ member.name }}')">Ban</button>
+                                    <button class="btn btn-kick btn-sm" onclick="openActionModal('kick', '{{ guild.id }}', '{{ member.id }}', '{{ member.name }}')">Kick</button>
+                                    <button class="btn btn-mute btn-sm" onclick="openActionModal('mute', '{{ guild.id }}', '{{ member.id }}', '{{ member.name }}')">Mute</button>
+                                    <button class="btn btn-unmute btn-sm" onclick="openActionModal('unmute', '{{ guild.id }}', '{{ member.id }}', '{{ member.name }}')">Unmute</button>
+                                    <button class="btn btn-role btn-sm" onclick="openRoleModal('{{ guild.id }}', '{{ member.id }}', '{{ member.name }}')">Give Role</button>
                                 </td>
                             </tr>
                             {% endfor %}
@@ -100,41 +133,55 @@
         <div id="tab-roles" class="tab-content">
             <div class="section">
                 <h2>🎭 Roles</h2>
-                <div style="margin-bottom:16px;">
-                    <input type="text" id="roleName" placeholder="Role name" style="padding:8px 12px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:8px;color:#fff;margin-right:8px;">
+                <div style="margin-bottom:16px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+                    <input type="text" id="roleName" placeholder="Role name" style="padding:8px 12px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:8px;color:#fff;flex:1;min-width:150px;">
                     <input type="color" id="roleColor" value="#5865F2" style="padding:4px;border-radius:8px;background:transparent;border:1px solid rgba(255,255,255,0.08);">
                     <button class="btn btn-role" onclick="createRole('{{ guild.id }}')">+ Create Role</button>
                 </div>
-                <table>
-                    <thead><tr><th>Name</th><th>Color</th><th>ID</th><th>Actions</th></tr></thead>
-                    <tbody>
-                        {% for role in roles %}
-                        <tr>
-                            <td><span class="role-tag" style="background:#{{ '%06x' % role.color }};color:#fff;">{{ role.name }}</span></td>
-                            <td>#{{ '%06x' % role.color }}</td>
-                            <td style="font-family:monospace;font-size:11px;">{{ role.id }}</td>
-                            <td>
-                                <button class="btn btn-ban btn-sm" onclick="deleteRole('{{ guild.id }}', '{{ role.id }}')">Delete</button>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+                <div class="scrollable">
+                    <table>
+                        <thead><tr><th>Name</th><th>Color</th><th>Members</th><th>Position</th><th>Actions</th></tr></thead>
+                        <tbody>
+                            {% for role in roles %}
+                            <tr>
+                                <td><span class="role-tag" style="background:#{{ '%06x' % role.color }};color:#fff;">{{ role.name }}</span></td>
+                                <td>#{{ '%06x' % role.color }}</td>
+                                <td>{{ role.members or 0 }}</td>
+                                <td>{{ role.position or 0 }}</td>
+                                <td>
+                                    <button class="btn btn-danger btn-sm" onclick="deleteRole('{{ guild.id }}', '{{ role.id }}', '{{ role.name }}')">Delete</button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
 
         <!-- CHANNELS TAB -->
         <div id="tab-channels" class="tab-content">
             <div class="section">
-                <h2>📝 Channels</h2>
-                <table>
-                    <thead><tr><th>Name</th><th>Type</th><th>ID</th></tr></thead>
-                    <tbody>
-                        {% for channel in channels %}
-                        <tr><td>#{{ channel.name }}</td><td>{{ channel.type }}</td><td style="font-family:monospace;font-size:11px;">{{ channel.id }}</td></tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+                <h2>📝 Channels
+                    <button class="btn btn-success" onclick="openChannelModal('{{ guild.id }}')">+ Create Channel</button>
+                </h2>
+                <div class="scrollable">
+                    <table>
+                        <thead><tr><th>Name</th><th>Type</th><th>ID</th><th>Actions</th></tr></thead>
+                        <tbody>
+                            {% for channel in channels %}
+                            <tr>
+                                <td>#{{ channel.name }}</td>
+                                <td>{{ channel.type }}</td>
+                                <td style="font-family:monospace;font-size:11px;">{{ channel.id }}</td>
+                                <td>
+                                    <button class="btn btn-danger btn-sm" onclick="deleteChannel('{{ guild.id }}', '{{ channel.id }}', '{{ channel.name }}')">Delete</button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
 
@@ -142,25 +189,98 @@
         <div id="tab-invites" class="tab-content">
             <div class="section">
                 <h2>🔗 Invites</h2>
-                <table>
-                    <thead><tr><th>Code</th><th>Uses</th><th>Max Uses</th><th>Created</th></tr></thead>
-                    <tbody>
-                        {% for invite in invites %}
-                        <tr><td>{{ invite.code }}</td><td>{{ invite.uses }}</td><td>{{ invite.max_uses }}</td><td>{{ invite.created_at }}</td></tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+                <div class="scrollable">
+                    <table>
+                        <thead><tr><th>Code</th><th>Uses</th><th>Max Uses</th><th>Created</th></tr></thead>
+                        <tbody>
+                            {% for invite in invites %}
+                            <tr><td>{{ invite.code }}</td><td>{{ invite.uses }}</td><td>{{ invite.max_uses }}</td><td>{{ invite.created_at }}</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- HIERARCHY TAB -->
+        <div id="tab-hierarchy" class="tab-content">
+            <div class="section">
+                <h2>📊 Role Hierarchy
+                    <button class="btn btn-info" onclick="fixHierarchy('{{ guild.id }}')">🔧 Fix Bot Position</button>
+                </h2>
+                <div class="hierarchy-box" id="hierarchyContainer">
+                    <div style="color:rgba(255,255,255,0.4);text-align:center;padding:20px;">Loading hierarchy...</div>
+                </div>
             </div>
         </div>
     </div>
 
+    <!-- ACTION MODAL -->
+    <div class="modal-overlay" id="actionModal">
+        <div class="modal">
+            <h2 id="actionTitle">Action</h2>
+            <p id="actionDesc" style="color:rgba(255,255,255,0.6);margin-bottom:16px;"></p>
+            <input type="text" id="actionReason" placeholder="Reason (optional)" style="width:100%;padding:12px;border-radius:8px;border:1px solid #333;background:#0d0d1a;color:#fff;">
+            <div class="btn-group">
+                <button class="btn btn-danger" onclick="confirmAction()">Confirm</button>
+                <button class="btn btn-close" onclick="closeModal('actionModal')">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ROLE MODAL -->
+    <div class="modal-overlay" id="roleModal">
+        <div class="modal">
+            <h2>🎭 Give/Remove Role</h2>
+            <p id="roleDesc" style="color:rgba(255,255,255,0.6);margin-bottom:16px;"></p>
+            <select id="roleSelect" style="width:100%;padding:12px;border-radius:8px;border:1px solid #333;background:#0d0d1a;color:#fff;">
+                <option value="">Select a role...</option>
+            </select>
+            <div class="btn-group">
+                <button class="btn btn-success" onclick="confirmRole('give')">Give Role</button>
+                <button class="btn btn-danger" onclick="confirmRole('remove')">Remove Role</button>
+                <button class="btn btn-close" onclick="closeModal('roleModal')">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- CHANNEL MODAL -->
+    <div class="modal-overlay" id="channelModal">
+        <div class="modal">
+            <h2>📝 Create Channel</h2>
+            <input type="text" id="channelName" placeholder="Channel name" style="width:100%;padding:12px;border-radius:8px;border:1px solid #333;background:#0d0d1a;color:#fff;">
+            <select id="channelType" style="width:100%;padding:12px;border-radius:8px;border:1px solid #333;background:#0d0d1a;color:#fff;margin-top:8px;">
+                <option value="text">Text Channel</option>
+                <option value="voice">Voice Channel</option>
+            </select>
+            <div class="btn-group">
+                <button class="btn btn-success" onclick="confirmChannel('{{ guild.id }}')">Create</button>
+                <button class="btn btn-close" onclick="closeModal('channelModal')">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- TOAST -->
+    <div id="toast" class="toast" style="display:none;"></div>
+
     <script>
+        let actionData = {};
+        let roleData = {};
+
+        // ─── TABS ──────────────────────────────────────────────────────────────
+
         function showTab(tab) {
             document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
             document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
             document.getElementById('tab-' + tab).classList.add('active');
             document.querySelector(`.tab[onclick*="${tab}"]`).classList.add('active');
+            
+            if (tab === 'hierarchy') {
+                loadHierarchy();
+            }
         }
+
+        // ─── SEARCH ────────────────────────────────────────────────────────────
 
         function searchMembers() {
             const input = document.getElementById('memberSearch').value.toLowerCase();
@@ -170,26 +290,195 @@
             });
         }
 
-        function action(type, guildId, userId) {
-            const reason = prompt('Reason for ' + type + '?');
-            if (!reason && reason !== '') return;
+        // ─── TOAST ─────────────────────────────────────────────────────────────
+
+        function showToast(message, type = 'success') {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = 'toast toast-' + type;
+            toast.style.display = 'block';
+            setTimeout(() => { toast.style.display = 'none'; }, 4000);
+        }
+
+        // ─── MODALS ────────────────────────────────────────────────────────────
+
+        function openModal(id) {
+            document.getElementById(id).classList.add('active');
+        }
+
+        function closeModal(id) {
+            document.getElementById(id).classList.remove('active');
+        }
+
+        // ─── ACTION MODAL ─────────────────────────────────────────────────────
+
+        function openActionModal(type, guildId, userId, userName) {
+            const titles = {
+                'ban': '🔨 Ban User',
+                'kick': '👢 Kick User',
+                'mute': '🔇 Mute User',
+                'unmute': '🔊 Unmute User'
+            };
+            document.getElementById('actionTitle').textContent = titles[type] || 'Action';
+            document.getElementById('actionDesc').textContent = `${userName} (ID: ${userId})`;
+            document.getElementById('actionReason').value = '';
+            actionData = { type, guildId, userId };
+            openModal('actionModal');
+        }
+
+        function confirmAction() {
+            const reason = document.getElementById('actionReason').value || 'No reason';
+            const { type, guildId, userId } = actionData;
+            
             fetch('/api/' + type, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ guild_id: guildId, user_id: userId, reason: reason || 'No reason' })
+                body: JSON.stringify({ guild_id: guildId, user_id: userId, reason: reason })
             })
             .then(r => r.json())
             .then(data => {
-                alert(data.success ? '✅ ' + data.message : '❌ ' + data.error);
-                location.reload();
+                closeModal('actionModal');
+                if (data.success) {
+                    showToast('✅ ' + data.message, 'success');
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    showToast('❌ ' + data.error, 'error');
+                }
             })
-            .catch(() => alert('❌ Error!'));
+            .catch(() => {
+                closeModal('actionModal');
+                showToast('❌ Error!', 'error');
+            });
         }
 
+        // ─── ROLE MODAL ──────────────────────────────────────────────────────
+
+        function openRoleModal(guildId, userId, userName) {
+            document.getElementById('roleDesc').textContent = `${userName} (ID: ${userId})`;
+            roleData = { guildId, userId };
+            
+            // Fetch roles
+            fetch('/api/guild/' + guildId)
+                .then(r => r.json())
+                .then(data => {
+                    const select = document.getElementById('roleSelect');
+                    select.innerHTML = '<option value="">Select a role...</option>';
+                    data.roles.forEach(role => {
+                        const opt = document.createElement('option');
+                        opt.value = role.id;
+                        opt.textContent = role.name;
+                        select.appendChild(opt);
+                    });
+                });
+            
+            openModal('roleModal');
+        }
+
+        function confirmRole(action) {
+            const roleId = document.getElementById('roleSelect').value;
+            if (!roleId) {
+                showToast('Please select a role!', 'error');
+                return;
+            }
+            
+            const endpoint = action === 'give' ? '/api/role-give' : '/api/role-remove';
+            fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    guild_id: roleData.guildId,
+                    user_id: roleData.userId,
+                    role_id: roleId
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                closeModal('roleModal');
+                if (data.success) {
+                    showToast('✅ ' + data.message, 'success');
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    showToast('❌ ' + data.error, 'error');
+                }
+            })
+            .catch(() => {
+                closeModal('roleModal');
+                showToast('❌ Error!', 'error');
+            });
+        }
+
+        // ─── CHANNEL MODAL ──────────────────────────────────────────────────
+
+        function openChannelModal(guildId) {
+            document.getElementById('channelName').value = '';
+            document.getElementById('channelType').value = 'text';
+            roleData.guildId = guildId;
+            openModal('channelModal');
+        }
+
+        function confirmChannel(guildId) {
+            const name = document.getElementById('channelName').value.trim();
+            const type = document.getElementById('channelType').value;
+            
+            if (!name) {
+                showToast('Please enter a channel name!', 'error');
+                return;
+            }
+            
+            fetch('/api/create_channel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ guild_id: guildId, name: name, type: type })
+            })
+            .then(r => r.json())
+            .then(data => {
+                closeModal('channelModal');
+                if (data.success) {
+                    showToast('✅ ' + data.message, 'success');
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    showToast('❌ ' + data.error, 'error');
+                }
+            })
+            .catch(() => {
+                closeModal('channelModal');
+                showToast('❌ Error!', 'error');
+            });
+        }
+
+        // ─── DELETE CHANNEL ─────────────────────────────────────────────────
+
+        function deleteChannel(guildId, channelId, channelName) {
+            if (!confirm(`Delete channel #${channelName}?`)) return;
+            
+            fetch('/api/delete_channel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ guild_id: guildId, channel_id: channelId })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    showToast('✅ ' + data.message, 'success');
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    showToast('❌ ' + data.error, 'error');
+                }
+            })
+            .catch(() => showToast('❌ Error!', 'error'));
+        }
+
+        // ─── CREATE ROLE ────────────────────────────────────────────────────
+
         function createRole(guildId) {
-            const name = document.getElementById('roleName').value;
+            const name = document.getElementById('roleName').value.trim();
             const color = document.getElementById('roleColor').value;
-            if (!name) { alert('Enter role name!'); return; }
+            
+            if (!name) {
+                showToast('Please enter a role name!', 'error');
+                return;
+            }
+            
             fetch('/api/role-create', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -197,14 +486,22 @@
             })
             .then(r => r.json())
             .then(data => {
-                alert(data.success ? '✅ ' + data.message : '❌ ' + data.error);
-                location.reload();
+                if (data.success) {
+                    showToast('✅ ' + data.message, 'success');
+                    document.getElementById('roleName').value = '';
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    showToast('❌ ' + data.error, 'error');
+                }
             })
-            .catch(() => alert('❌ Error!'));
+            .catch(() => showToast('❌ Error!', 'error'));
         }
 
-        function deleteRole(guildId, roleId) {
-            if (!confirm('Delete this role?')) return;
+        // ─── DELETE ROLE ────────────────────────────────────────────────────
+
+        function deleteRole(guildId, roleId, roleName) {
+            if (!confirm(`Delete role "${roleName}"?`)) return;
+            
             fetch('/api/role-delete', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -212,11 +509,78 @@
             })
             .then(r => r.json())
             .then(data => {
-                alert(data.success ? '✅ ' + data.message : '❌ ' + data.error);
-                location.reload();
+                if (data.success) {
+                    showToast('✅ ' + data.message, 'success');
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    showToast('❌ ' + data.error, 'error');
+                }
             })
-            .catch(() => alert('❌ Error!'));
+            .catch(() => showToast('❌ Error!', 'error'));
         }
+
+        // ─── HIERARCHY ──────────────────────────────────────────────────────
+
+        function loadHierarchy() {
+            const container = document.getElementById('hierarchyContainer');
+            const guildId = '{{ guild.id }}';
+            
+            fetch('/api/guild/' + guildId)
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.roles || data.roles.length === 0) {
+                        container.innerHTML = '<div style="color:rgba(255,255,255,0.4);text-align:center;padding:20px;">No roles found</div>';
+                        return;
+                    }
+                    
+                    let html = '<div style="font-size:12px;color:rgba(255,255,255,0.3);margin-bottom:12px;">⬆️ Higher Position (More Power)</div>';
+                    data.roles.sort((a, b) => b.position - a.position);
+                    
+                    data.roles.forEach((role, index) => {
+                        const isBot = role.name === 'EditH' || role.name === bot.user?.name;
+                        const isItsme = role.name === 'itsme';
+                        html += `
+                            <div class="hierarchy-item">
+                                <span class="pos">#${index + 1}</span>
+                                <span class="name" style="color:${isBot ? '#5865F2' : isItsme ? '#ff4444' : '#fff'}">
+                                    ${role.name}
+                                    ${isBot ? '<span class="bot-badge">🤖 BOT</span>' : ''}
+                                    ${isItsme ? '<span class="itsme-badge">👑 ITSME</span>' : ''}
+                                </span>
+                                <span style="color:rgba(255,255,255,0.3);font-size:11px;">${role.members || 0} members</span>
+                            </div>
+                        `;
+                    });
+                    
+                    html += '<div style="font-size:12px;color:rgba(255,255,255,0.3);margin-top:12px;">⬇️ Lower Position (Less Power)</div>';
+                    container.innerHTML = html;
+                })
+                .catch(() => {
+                    container.innerHTML = '<div style="color:rgba(255,255,255,0.4);text-align:center;padding:20px;">Failed to load hierarchy</div>';
+                });
+        }
+
+        function fixHierarchy(guildId) {
+            fetch('/api/fix_hierarchy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ guild_id: guildId })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    showToast('✅ ' + data.message, 'success');
+                    loadHierarchy();
+                } else {
+                    showToast('❌ ' + data.error, 'error');
+                }
+            })
+            .catch(() => showToast('❌ Error!', 'error'));
+        }
+
+        // ─── AUTO-LOAD HIERARCHY ───────────────────────────────────────────
+
+        // Load hierarchy when tab is shown
     </script>
 </body>
 </html>
