@@ -9,6 +9,7 @@
 
 import os, sys, json, io, random, asyncio, sqlite3, secrets, requests, logging, threading, time
 from datetime import datetime, timedelta
+import hashlib
 from typing import Optional, Dict, List, Any
 
 import discord
