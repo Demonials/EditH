@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📊 Moderator Dashboard</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800;900&display=swap');
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #0a0a0f;
+            color: #ffffff;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        .header h1 {
+            font-size: 28px;
+            font-weight: 800;
+            background: linear-gradient(135deg, #ffaa00, #ff6b00);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .header .badge {
+            background: rgba(255,170,0,0.15);
+            border: 1px solid rgba(255,170,0,0.3);
+            padding: 8px 16px;
+            border-radius: 100px;
+            font-size: 12px;
+            color: #ffaa00;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .header .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: #4CAF50; animation: pulseDot 2s infinite; }
+        @keyframes pulseDot { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .logout-btn {
+            padding: 10px 24px;
+            background: rgba(255,50,50,0.15);
+            border: 1px solid rgba(255,50,50,0.3);
+            border-radius: 10px;
+            color: #ff6b6b;
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+        .logout-btn:hover { background: rgba(255,50,50,0.25); }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 30px;
+        }
+        .stat-card {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.05);
+            border-radius: 16px;
+            padding: 24px;
+            text-align: center;
+        }
+        .stat-number { font-size: 2.5em; font-weight: 800; color: #ffaa00; }
+        .stat-label { font-size: 13px; color: rgba(255,255,255,0.4); margin-top: 4px; }
+        .section {
+            background: rgba(255,255,255,0.02);
+            border: 1px solid rgba(255,255,255,0.04);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+        .section h2 { font-size: 18px; font-weight: 700; margin-bottom: 16px; color: rgba(255,255,255,0.8); }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th {
+            text-align: left;
+            padding: 12px 12px;
+            color: rgba(255,255,255,0.3);
+            font-weight: 600;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            text-transform: uppercase;
+            font-size: 10px;
+            letter-spacing: 0.5px;
+        }
+        td { padding: 12px 12px; border-bottom: 1px solid rgba(255,255,255,0.03); color: rgba(255,255,255,0.7); }
+        .empty-state { color: rgba(255,255,255,0.2); text-align: center; padding: 30px; font-size: 14px; }
+        @media (max-width: 768px) { .header { flex-direction: column; align-items: flex-start; } .stats { grid-template-columns: repeat(2, 1fr); } }
+        .scrollable { overflow-x: auto; max-height: 400px; overflow-y: auto; }
+        .scrollable::-webkit-scrollbar { width: 4px; }
+        .scrollable::-webkit-scrollbar-track { background: transparent; }
+        .scrollable::-webkit-scrollbar-thumb { background: rgba(255,170,0,0.3); border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1>📊 Moderator Dashboard</h1>
+                <div style="font-size:13px;color:rgba(255,255,255,0.3);margin-top:4px;">{{ login_time }}</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px;">
+                <span class="badge"><span class="dot"></span> Moderator Session</span>
+                <a href="/logout" class="logout-btn">🚪 Logout</a>
+            </div>
+        </div>
+
+        <div class="stats">
+            <div class="stat-card"><div class="stat-number">{{ total_users }}</div><div class="stat-label">Total Users</div></div>
+            <div class="stat-card"><div class="stat-number">{{ total_servers }}</div><div class="stat-label">Servers</div></div>
+        </div>
+
+        <div class="section">
+            <h2>👤 Users</h2>
+            <div class="scrollable">
+                <table>
+                    <thead><tr><th>User</th><th>Email</th><th>Guild</th><th>Verified At</th></tr></thead>
+                    <tbody>
+                        {% for user in users %}
+                        <tr>
+                            <td><strong>{{ user.username or 'Unknown' }}</strong></td>
+                            <td>{{ user.email or 'N/A' }}</td>
+                            <td>{{ user.guild_id or 'N/A' }}</td>
+                            <td>{{ user.verified_at[:16] if user.verified_at else 'N/A' }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="4" class="empty-state">No users found</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
