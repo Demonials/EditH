@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>👤 User Dashboard</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800;900&display=swap');
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #0a0a0f;
+            color: #ffffff;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        .header h1 {
+            font-size: 28px;
+            font-weight: 800;
+            background: linear-gradient(135deg, #4CAF50, #66BB6A);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .header .badge {
+            background: rgba(76,175,80,0.15);
+            border: 1px solid rgba(76,175,80,0.3);
+            padding: 8px 16px;
+            border-radius: 100px;
+            font-size: 12px;
+            color: #4CAF50;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .header .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: #4CAF50; animation: pulseDot 2s infinite; }
+        @keyframes pulseDot { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .logout-btn {
+            padding: 10px 24px;
+            background: rgba(255,50,50,0.15);
+            border: 1px solid rgba(255,50,50,0.3);
+            border-radius: 10px;
+            color: #ff6b6b;
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+        .logout-btn:hover { background: rgba(255,50,50,0.25); }
+        .card {
+            background: rgba(255,255,255,0.02);
+            border: 1px solid rgba(255,255,255,0.04);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+        .card h2 { font-size: 18px; font-weight: 700; margin-bottom: 16px; color: rgba(255,255,255,0.8); }
+        .info-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+        .info-item {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.04);
+            border-radius: 12px;
+            padding: 16px;
+        }
+        .info-item .label { font-size: 11px; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 0.5px; }
+        .info-item .value { font-size: 16px; font-weight: 600; margin-top: 4px; }
+        .info-item .value.username { color: #4CAF50; }
+        @media (max-width: 480px) { .info-grid { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1>👤 User Dashboard</h1>
+                <div style="font-size:13px;color:rgba(255,255,255,0.3);margin-top:4px;">{{ login_time }}</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px;">
+                <span class="badge"><span class="dot"></span> User Session</span>
+                <a href="/logout" class="logout-btn">🚪 Logout</a>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>📋 Your Profile</h2>
+            <div class="info-grid">
+                <div class="info-item"><div class="label">👤 Username</div><div class="value username">{{ username }}</div></div>
+                <div class="info-item"><div class="label">🆔 User ID</div><div class="value">{{ user_id }}</div></div>
+                <div class="info-item"><div class="label">📧 Email</div><div class="value">{{ email }}</div></div>
+                <div class="info-item"><div class="label">🏰 Servers</div><div class="value">{{ servers_count }}</div></div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
