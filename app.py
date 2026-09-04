@@ -11,6 +11,7 @@ import sys
 import json
 import secrets
 import requests
+import sqlite3
 import threading
 import asyncio
 import logging
@@ -76,24 +77,18 @@ if not TOKEN or not CLIENT_ID or not CLIENT_SECRET:
 
 # ─── FIREBASE INIT ──────────────────────────────────────────────────────────
 
-if not FIREBASE_URL or not FIREBASE_KEY or not FIREBASE_EMAIL:
-    logger.warning("⚠️ Firebase not configured! Data will be stored locally only.")
+# ─── FIREBASE INIT ──────────────────────────────────────────────────────────
+
+FIREBASE_JSON = os.getenv('FIREBASE_KEY_JSON')
+
+if not FIREBASE_URL or not FIREBASE_JSON:
+    logger.warning("⚠️ Firebase not configured!")
     FIREBASE_ENABLED = False
 else:
     FIREBASE_ENABLED = True
     try:
-        cred_dict = {
-            "type": "service_account",
-            "project_id": FIREBASE_URL.split('/')[2].split('.')[0],
-            "private_key_id": "dummy",
-            "private_key": FIREBASE_KEY,
-            "client_email": FIREBASE_EMAIL,
-            "client_id": "dummy",
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-            "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{FIREBASE_EMAIL}"
-        }
+        # 🔥 Directly use the JSON
+        cred_dict = json.loads(FIREBASE_JSON)
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred, {'databaseURL': FIREBASE_URL})
         ref = firebase_db.reference('/')
