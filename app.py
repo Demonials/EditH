@@ -2,7 +2,7 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
                     🔐 ANION VERIFICATION SYSTEM v4.0
-                    FIREBASE + DISCORD OAUTH
+                    FIREBASE + DISCORD OAUTH + SERVER-LEVEL
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -74,6 +74,8 @@ if not TOKEN or not CLIENT_ID or not CLIENT_SECRET:
     logger.error("❌ Missing required environment variables!")
     sys.exit(1)
 
+# ─── FIREBASE INIT ──────────────────────────────────────────────────────────
+
 if not FIREBASE_URL or not FIREBASE_KEY or not FIREBASE_EMAIL:
     logger.warning("⚠️ Firebase not configured! Data will be stored locally only.")
     FIREBASE_ENABLED = False
@@ -96,7 +98,7 @@ else:
         firebase_admin.initialize_app(cred, {'databaseURL': FIREBASE_URL})
         ref = firebase_db.reference('/')
         ref.update({'status': 'online', 'timestamp': datetime.now().isoformat()})
-        logger.info("✅ Firebase Connected!")
+        logger.info("✅ Firebase Connected Successfully!")
     except Exception as e:
         logger.error(f"❌ Firebase connection failed: {e}")
         FIREBASE_ENABLED = False
@@ -105,6 +107,7 @@ DB_FILE = os.path.join(DB_PATH, 'verification.db')
 logger.info(f"✅ Token: {TOKEN[:15]}...")
 logger.info(f"✅ Firebase: {'Enabled' if FIREBASE_ENABLED else 'Disabled (local only)'}")
 logger.info(f"✅ Database: {DB_FILE}")
+logger.info(f"✅ Port: {PORT}")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # DATABASE (Local SQLite)
@@ -234,6 +237,11 @@ def firebase_delete_user(user_id, guild_id):
     try:
         ref = firebase_db.reference(f'/users/{user_id}/guilds/{guild_id}')
         ref.delete()
+        # Check if user has any other guilds
+        user_ref = firebase_db.reference(f'/users/{user_id}')
+        user_data = user_ref.get()
+        if not user_data or not user_data.get('guilds'):
+            user_ref.delete()
         return True
     except Exception as e:
         logger.error(f"❌ Firebase delete error: {e}")
@@ -302,10 +310,7 @@ def verify_page():
                 animation: bgPulse 8s ease-in-out infinite alternate;
                 z-index: 0;
             }
-            @keyframes bgPulse {
-                0% { transform: scale(1) rotate(0deg); }
-                100% { transform: scale(1.1) rotate(3deg); }
-            }
+            @keyframes bgPulse { 0% { transform: scale(1) rotate(0deg); } 100% { transform: scale(1.1) rotate(3deg); } }
             .container {
                 position: relative;
                 z-index: 1;
@@ -322,9 +327,7 @@ def verify_page():
                 opacity: 0;
                 transform: translateY(30px);
             }
-            @keyframes slideUp {
-                to { opacity: 1; transform: translateY(0); }
-            }
+            @keyframes slideUp { to { opacity: 1; transform: translateY(0); } }
             .shield-icon { font-size: 56px; margin-bottom: 16px; animation: float 3s ease-in-out infinite; }
             @keyframes float { 0%, 100% { transform: translateY(0px); } 50% { transform: translateY(-10px); } }
             h1 {
@@ -349,13 +352,7 @@ def verify_page():
                 color: #8b8cf7;
                 margin-bottom: 24px;
             }
-            .security-badge .dot {
-                width: 6px;
-                height: 6px;
-                border-radius: 50%;
-                background: #4CAF50;
-                animation: pulseDot 2s infinite;
-            }
+            .security-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: #4CAF50; animation: pulseDot 2s infinite; }
             @keyframes pulseDot { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
             .features {
                 display: flex;
@@ -399,10 +396,7 @@ def verify_page():
                 transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
                 font-family: 'Inter', sans-serif;
             }
-            .btn-verify:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 12px 40px rgba(88, 101, 242, 0.35);
-            }
+            .btn-verify:hover { transform: translateY(-2px); box-shadow: 0 12px 40px rgba(88, 101, 242, 0.35); }
             .btn-verify .arrow { font-size: 20px; transition: transform 0.3s ease; }
             .btn-verify:hover .arrow { transform: translateX(4px); }
             .footer-text { margin-top: 20px; font-size: 11px; color: rgba(255, 255, 255, 0.2); }
@@ -473,14 +467,14 @@ def oauth():
 def callback():
     code = request.args.get('code')
     guild_id = request.args.get('state')
-    
+
     logger.info(f"📥 Callback received - Code: {code[:20] if code else 'None'}..., Guild: {guild_id}")
-    
+
     if not code:
         return "❌ No code provided", 400
     if not guild_id:
         return "❌ No guild_id provided", 400
-    
+
     data = {
         'client_id': CLIENT_ID,
         'client_secret': CLIENT_SECRET,
@@ -488,7 +482,7 @@ def callback():
         'code': code,
         'redirect_uri': REDIRECT_URI
     }
-    
+
     try:
         resp = requests.post('https://discord.com/api/oauth2/token', data=data, timeout=10)
         token_data = resp.json()
@@ -496,18 +490,18 @@ def callback():
     except Exception as e:
         logger.error(f"❌ Token exchange failed: {e}")
         return f"❌ Token exchange failed: {e}", 400
-    
+
     if 'access_token' not in token_data:
         logger.error(f"❌ No access token: {token_data}")
         return f"❌ No access token: {token_data}", 400
-    
+
     access_token = token_data['access_token']
     refresh_token = token_data.get('refresh_token')
     expires_in = token_data.get('expires_in', 604800)
     expires_at = (datetime.now() + timedelta(seconds=expires_in)).isoformat()
-    
+
     headers = {'Authorization': f'Bearer {access_token}'}
-    
+
     try:
         user_resp = requests.get('https://discord.com/api/users/@me', headers=headers, timeout=10)
         user_data = user_resp.json()
@@ -515,18 +509,18 @@ def callback():
     except Exception as e:
         logger.error(f"❌ Failed to get user data: {e}")
         return f"❌ Failed to get user data: {e}", 400
-    
+
     try:
         guilds_resp = requests.get('https://discord.com/api/users/@me/guilds', headers=headers, timeout=10)
         guilds_data = guilds_resp.json()
     except Exception as e:
         logger.error(f"❌ Failed to get guilds: {e}")
         guilds_data = []
-    
+
     # ─── SAVE TO LOCAL DB ──────────────────────────────────────────────────
-    
+
     db_execute("""
-        INSERT OR REPLACE INTO verified_users 
+        INSERT OR REPLACE INTO verified_users
         (user_id, guild_id, username, email, access_token, refresh_token)
         VALUES (?, ?, ?, ?, ?, ?)
     """, (
@@ -537,7 +531,7 @@ def callback():
         access_token,
         refresh_token
     ))
-    
+
     db_execute("""
         INSERT OR REPLACE INTO oauth_tokens
         (user_id, guild_id, access_token, refresh_token, expires_at)
@@ -549,9 +543,9 @@ def callback():
         refresh_token,
         expires_at
     ))
-    
+
     # ─── SAVE TO FIREBASE ──────────────────────────────────────────────────
-    
+
     firebase_data = {
         'user_id': user_data.get('id'),
         'username': user_data.get('username'),
@@ -565,7 +559,7 @@ def callback():
         'verified_at': datetime.now().isoformat(),
         'guild_id': guild_id
     }
-    
+
     firebase_save_user(user_data.get('id'), guild_id, firebase_data)
     firebase_log('verification', {
         'user_id': user_data.get('id'),
@@ -573,7 +567,7 @@ def callback():
         'guild_id': guild_id,
         'email': user_data.get('email', '')
     })
-    
+
     logger.info("=" * 70)
     logger.info("✅ USER VERIFIED & SAVED TO FIREBASE!")
     logger.info("=" * 70)
@@ -582,23 +576,23 @@ def callback():
     logger.info(f"  📧 Email: {user_data.get('email', 'N/A')}")
     logger.info(f"  🏰 Guild: {guild_id}")
     logger.info("=" * 70)
-    
+
     # ─── ASSIGN ROLE ──────────────────────────────────────────────────────
-    
+
     if bot_instance:
         asyncio.run_coroutine_threadsafe(
             assign_verified_role(user_data.get('id'), guild_id, user_data.get('username')),
             bot_instance.loop
         )
-    
+
     guild_name = guild_id
     if bot_instance:
         guild = bot_instance.get_guild(int(guild_id))
         if guild:
             guild_name = guild.name
-    
+
     # ─── SUCCESS PAGE ──────────────────────────────────────────────────────
-    
+
     return render_template_string("""
     <!DOCTYPE html>
     <html>
@@ -733,10 +727,7 @@ def callback():
                 font-family: 'Inter', sans-serif;
                 transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
             }
-            .btn-done:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 12px 40px rgba(76, 175, 80, 0.35);
-            }
+            .btn-done:hover { transform: translateY(-2px); box-shadow: 0 12px 40px rgba(76, 175, 80, 0.35); }
             .footer-text { margin-top: 16px; font-size: 11px; color: rgba(255, 255, 255, 0.15); }
             .particle {
                 position: fixed;
@@ -773,4 +764,308 @@ def callback():
             <div class="info-grid">
                 <div class="info-card"><div class="label">👤 User</div><div class="value username">{{ username }}</div></div>
                 <div class="info-card"><div class="label">🆔 User ID</div><div class="value">{{ user_id }}</div></div>
-                <div class="info-card"><div class="label">📧 Email</
+                <div class="info-card"><div class="label">📧 Email</div><div class="value">{{ email }}</div></div>
+                <div class="info-card"><div class="label">🏰 Server</div><div class="value guild">{{ guild_name }}</div></div>
+                <div class="info-card" style="grid-column: 1 / -1;"><div class="label">🔑 Verified At</div><div class="value">{{ verified_at }}</div></div>
+            </div>
+            <a href="https://discord.com/app" class="btn-done"><span>🎯</span><span>Return to Discord</span></a>
+            <div class="footer-text">🔒 Your verification status is securely stored</div>
+        </div>
+    </body>
+    </html>
+    """,
+    username=user_data.get('username', 'User'),
+    discriminator=user_data.get('discriminator', '0'),
+    user_id=user_data.get('id', 'Unknown'),
+    email=user_data.get('email', 'Not provided'),
+    guild_name=guild_name,
+    verified_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    )
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ASSIGN ROLE FUNCTION
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def assign_verified_role(user_id, guild_id, username):
+    """Assign verified role to user"""
+    if not bot_instance:
+        logger.warning("⚠️ Bot instance not available")
+        return
+
+    guild = bot_instance.get_guild(int(guild_id))
+    if not guild:
+        logger.warning(f"❌ Guild {guild_id} not found")
+        return
+
+    member = guild.get_member(int(user_id))
+    if not member:
+        logger.warning(f"❌ Member {user_id} not found in guild")
+        return
+
+    settings = db_fetch_one("SELECT verified_role_id FROM guild_settings WHERE guild_id=?", (guild_id,))
+    if not settings or not settings['verified_role_id']:
+        logger.warning(f"❌ No verified role set for guild {guild_id}")
+        return
+
+    role = guild.get_role(int(settings['verified_role_id']))
+    if not role:
+        logger.warning(f"❌ Role {settings['verified_role_id']} not found")
+        return
+
+    try:
+        await member.add_roles(role)
+        logger.info(f"✅ Assigned verified role to {username} in {guild.name}")
+
+        # Remove unverified role if exists
+        unverified_settings = db_fetch_one("SELECT unverified_role_id FROM guild_settings WHERE guild_id=?", (guild_id,))
+        if unverified_settings and unverified_settings['unverified_role_id']:
+            unverified_role = guild.get_role(int(unverified_settings['unverified_role_id']))
+            if unverified_role and unverified_role in member.roles:
+                await member.remove_roles(unverified_role)
+
+        # Log to channel
+        log_settings = db_fetch_one("SELECT log_channel_id FROM guild_settings WHERE guild_id=?", (guild_id,))
+        if log_settings and log_settings['log_channel_id']:
+            channel = guild.get_channel(int(log_settings['log_channel_id']))
+            if channel:
+                embed = discord.Embed(
+                    title="✅ User Verified",
+                    description=f"**{member.mention}** has been verified!",
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="Username", value=member.display_name, inline=True)
+                embed.add_field(name="User ID", value=member.id, inline=True)
+                embed.add_field(name="Verified At", value=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), inline=True)
+                await channel.send(embed=embed)
+
+    except Exception as e:
+        logger.error(f"❌ Failed to assign role: {e}")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DISCORD BOT
+# ═════════════════════════════════════════════════════════════════════════════
+
+class VerifyBot(commands.Bot):
+    def __init__(self):
+        intents = discord.Intents.all()
+        super().__init__(command_prefix='!', intents=intents)
+        self.start_time = datetime.now()
+
+    async def setup_hook(self):
+        await self.register_commands()
+        await self.tree.sync()
+        logger.info(f'✅ Commands synced!')
+
+    async def register_commands(self):
+
+        # ─── SETUP VERIFY ──────────────────────────────────────────────────
+
+        @self.tree.command(name="setupverify", description="⚙️ Setup verification system (Admin)")
+        @app_commands.default_permissions(administrator=True)
+        async def setupverify(interaction: discord.Interaction):
+            guild = interaction.guild
+
+            verified_role = discord.utils.get(guild.roles, name="Verified")
+            if not verified_role:
+                verified_role = await guild.create_role(name="Verified", color=discord.Color.green())
+
+            unverified_role = discord.utils.get(guild.roles, name="Unverified")
+            if not unverified_role:
+                unverified_role = await guild.create_role(name="Unverified", color=discord.Color.red())
+
+            category = discord.utils.get(guild.categories, name="🔐 Verification")
+            if not category:
+                category = await guild.create_category("🔐 Verification")
+
+            channel = discord.utils.get(guild.channels, name="🔐-verify-here")
+            if not channel:
+                channel = await guild.create_text_channel("🔐-verify-here", category=category)
+
+            db_execute("""
+                INSERT OR REPLACE INTO guild_settings
+                (guild_id, verified_role_id, unverified_role_id, verification_channel_id)
+                VALUES (?, ?, ?, ?)
+            """, (str(guild.id), str(verified_role.id), str(unverified_role.id), str(channel.id)))
+
+            for ch in guild.channels:
+                try:
+                    await ch.set_permissions(unverified_role, read_messages=False)
+                    await ch.set_permissions(verified_role, read_messages=True, send_messages=True)
+                except:
+                    pass
+
+            verify_url = f"https://edith.up.railway.app/verify?guild_id={guild.id}"
+
+            embed = discord.Embed(
+                title="🔐 **SERVER VERIFICATION REQUIRED**",
+                description=(
+                    "**Welcome to the server!**\n\n"
+                    "To access all channels and features, you need to verify your identity.\n\n"
+                    "🔒 **This process is secure and encrypted.**\n"
+                    "✅ **Only takes a few seconds.**\n"
+                    "🛡️ **Your data is protected.**"
+                ),
+                color=0x5865F2,
+                timestamp=datetime.now()
+            )
+            embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
+            embed.set_footer(text="Anion Verification System • Secure • Encrypted")
+
+            embed.add_field(
+                name="📋 What you'll get:",
+                value="✅ Full access to all channels\n✅ Verified role\n✅ Server member status",
+                inline=False
+            )
+            embed.add_field(
+                name="🔒 Privacy Policy:",
+                value="We only collect your Discord ID, username, and email for verification purposes.",
+                inline=False
+            )
+
+            view = View()
+            button = Button(
+                label="🛡️ Verify Now",
+                url=verify_url,
+                style=discord.ButtonStyle.success,
+                emoji="🔐"
+            )
+            view.add_item(button)
+
+            await channel.send(embed=embed, view=view)
+
+            embed = discord.Embed(
+                title="✅ Verification Setup Complete!",
+                description=(
+                    f"✅ Verified Role: {verified_role.mention}\n"
+                    f"✅ Unverified Role: {unverified_role.mention}\n"
+                    f"✅ Verification Channel: {channel.mention}\n\n"
+                    f"🔒 Server is now locked for unverified users!"
+                ),
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed)
+
+        # ─── SET VERIFIED ROLE ──────────────────────────────────────────
+
+        @self.tree.command(name="setverifiedrole", description="⚙️ Set verified role (Admin)")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.describe(role="Role for verified users")
+        async def setverifiedrole(interaction: discord.Interaction, role: discord.Role):
+            db_execute("""
+                INSERT OR REPLACE INTO guild_settings (guild_id, verified_role_id)
+                VALUES (?, ?)
+            """, (str(interaction.guild.id), str(role.id)))
+            embed = discord.Embed(title="✅ Verified Role Set", description=f"Verified role set to {role.mention}", color=discord.Color.green())
+            await interaction.response.send_message(embed=embed)
+
+        # ─── SET UNVERIFIED ROLE ──────────────────────────────────────
+
+        @self.tree.command(name="setunverifiedrole", description="⚙️ Set unverified role (Admin)")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.describe(role="Role for unverified users")
+        async def setunverifiedrole(interaction: discord.Interaction, role: discord.Role):
+            db_execute("""
+                INSERT OR REPLACE INTO guild_settings (guild_id, unverified_role_id)
+                VALUES (?, ?)
+            """, (str(interaction.guild.id), str(role.id)))
+            embed = discord.Embed(title="✅ Unverified Role Set", description=f"Unverified role set to {role.mention}", color=discord.Color.green())
+            await interaction.response.send_message(embed=embed)
+
+        # ─── SET LOG CHANNEL ──────────────────────────────────────────
+
+        @self.tree.command(name="setlogchannel", description="⚙️ Set log channel (Admin)")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.describe(channel="Channel for logs")
+        async def setlogchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+            db_execute("""
+                INSERT OR REPLACE INTO guild_settings (guild_id, log_channel_id)
+                VALUES (?, ?)
+            """, (str(interaction.guild.id), str(channel.id)))
+            embed = discord.Embed(title="✅ Log Channel Set", description=f"Log channel set to {channel.mention}", color=discord.Color.green())
+            await interaction.response.send_message(embed=embed)
+
+        # ─── VERIFY STATUS ─────────────────────────────────────────────
+
+        @self.tree.command(name="verifystatus", description="🔐 Check your verification status")
+        async def verifystatus(interaction: discord.Interaction):
+            user_id = str(interaction.user.id)
+            guild_id = str(interaction.guild.id)
+
+            verified = db_fetch_one("SELECT * FROM verified_users WHERE user_id=? AND guild_id=?", (user_id, guild_id))
+
+            if verified:
+                embed = discord.Embed(
+                    title="✅ Verified",
+                    description="You are verified in this server!",
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="Verified At", value=verified['verified_at'], inline=False)
+            else:
+                embed = discord.Embed(
+                    title="❌ Not Verified",
+                    description="Use the verify button to get verified.",
+                    color=discord.Color.red()
+                )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        # ─── PING ──────────────────────────────────────────────────────
+
+        @self.tree.command(name="ping", description="🏓 Check bot latency")
+        async def ping(interaction: discord.Interaction):
+            await interaction.response.send_message(f"🏓 Pong! {round(self.latency * 1000)}ms")
+
+    async def on_ready(self):
+        logger.info("=" * 70)
+        logger.info("✅✅✅ BOT IS ONLINE! ✅✅✅")
+        logger.info("=" * 70)
+        logger.info(f"📡 Name: {self.user.name}")
+        logger.info(f"🆔 ID: {self.user.id}")
+        logger.info(f"🏰 Servers: {len(self.guilds)}")
+        for guild in self.guilds:
+            logger.info(f"   - {guild.name} ({guild.id})")
+        logger.info("=" * 70)
+        logger.info("📋 Commands:")
+        logger.info("   /setupverify - Setup verification (Admin)")
+        logger.info("   /setverifiedrole - Set verified role (Admin)")
+        logger.info("   /setunverifiedrole - Set unverified role (Admin)")
+        logger.info("   /setlogchannel - Set log channel (Admin)")
+        logger.info("   /verifystatus - Check status")
+        logger.info("   /ping - Check latency")
+        logger.info("=" * 70)
+
+    async def on_member_remove(self, member):
+        """When member leaves, remove from database (server-level)"""
+        db_delete("DELETE FROM verified_users WHERE user_id=? AND guild_id=?", (str(member.id), str(member.guild.id)))
+        firebase_delete_user(str(member.id), str(member.guild.id))
+        logger.info(f"🗑️ Removed {member.display_name} from verified database (left server)")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ═════════════════════════════════════════════════════════════════════════════
+
+bot_instance = None
+
+def run_flask():
+    flask_app.run(host='0.0.0.0', port=PORT, debug=False)
+
+async def main():
+    global bot_instance
+    logger.info("🚀 Starting Verification System...")
+    logger.info("=" * 70)
+
+    # Start Flask
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    logger.info(f"🌐 Flask server started on port {PORT}")
+
+    # Start bot
+    bot_instance = VerifyBot()
+    await bot_instance.start(TOKEN)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("\n👋 Shutting down...")
+        sys.exit(0)
