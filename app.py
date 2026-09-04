@@ -17,6 +17,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from flask import Flask, request, redirect, render_template_string, jsonify, session
+from flask_session import Session
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -38,6 +39,7 @@ load_dotenv()
 
 DATA_DIR = '/data'
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, 'flask_session'), exist_ok=True)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # LOGGING
@@ -255,7 +257,6 @@ def firebase_delete_user(user_id, guild_id):
         return False
 
 def firebase_save_guild_setting(guild_id, key, value):
-    """Save guild setting to Firebase (PERSISTENT)"""
     if not FIREBASE_ENABLED:
         return False
     try:
@@ -267,7 +268,6 @@ def firebase_save_guild_setting(guild_id, key, value):
         return False
 
 def firebase_get_guild_settings(guild_id):
-    """Get all guild settings from Firebase"""
     if not FIREBASE_ENABLED:
         return {}
     try:
@@ -279,7 +279,6 @@ def firebase_get_guild_settings(guild_id):
         return {}
 
 def firebase_sync_guild_settings(guild_id):
-    """Sync local guild settings to Firebase"""
     settings = db_fetch_one("SELECT * FROM guild_settings WHERE guild_id=?", (guild_id,))
     if settings:
         firebase_save_guild_setting(guild_id, 'verified_role_id', settings['verified_role_id'])
@@ -312,7 +311,13 @@ flask_app = Flask(__name__)
 flask_app.secret_key = FLASK_SECRET
 flask_app.config['SESSION_TYPE'] = 'filesystem'
 flask_app.config['SESSION_PERMANENT'] = False
+flask_app.config['SESSION_FILE_DIR'] = '/data/flask_session'
+flask_app.config['SESSION_USE_SIGNER'] = True
+flask_app.config['SESSION_COOKIE_SECURE'] = True
+flask_app.config['SESSION_COOKIE_HTTPONLY'] = True
+flask_app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 CORS(flask_app)
+Session(flask_app)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # FLASK ROUTES - VERIFICATION
@@ -846,8 +851,6 @@ async def assign_verified_role(user_id, guild_id, username):
         logger.warning(f"❌ Member {user_id} not found in guild")
         return
 
-    # ─── GET SETTINGS FROM FIREBASE (PERSISTENT) ────────────────────────
-
     firebase_settings = firebase_get_guild_settings(guild_id)
     verified_role_id = None
 
@@ -855,7 +858,6 @@ async def assign_verified_role(user_id, guild_id, username):
         verified_role_id = firebase_settings['verified_role_id']
         logger.info(f"✅ Using Firebase settings for guild {guild_id}")
     else:
-        # Fallback to local DB
         settings = db_fetch_one("SELECT verified_role_id FROM guild_settings WHERE guild_id=?", (guild_id,))
         if settings:
             verified_role_id = settings['verified_role_id']
@@ -873,7 +875,6 @@ async def assign_verified_role(user_id, guild_id, username):
         await member.add_roles(role)
         logger.info(f"✅ Assigned verified role to {username} in {guild.name}")
 
-        # Remove unverified role if exists
         unverified_role_id = None
         if firebase_settings and firebase_settings.get('unverified_role_id'):
             unverified_role_id = firebase_settings['unverified_role_id']
@@ -887,7 +888,6 @@ async def assign_verified_role(user_id, guild_id, username):
             if unverified_role and unverified_role in member.roles:
                 await member.remove_roles(unverified_role)
 
-        # Log to channel
         log_channel_id = None
         if firebase_settings and firebase_settings.get('log_channel_id'):
             log_channel_id = firebase_settings['log_channel_id']
@@ -950,23 +950,17 @@ class VerifyBot(commands.Bot):
             if not channel:
                 channel = await guild.create_text_channel("🔐-verify-here", category=category)
 
-            # ─── SAVE TO LOCAL DB ──────────────────────────────────────────
-
             db_execute("""
                 INSERT OR REPLACE INTO guild_settings
                 (guild_id, verified_role_id, unverified_role_id, verification_channel_id)
                 VALUES (?, ?, ?, ?)
             """, (str(guild.id), str(verified_role.id), str(unverified_role.id), str(channel.id)))
 
-            # ─── SAVE TO FIREBASE (PERSISTENT) ─────────────────────────────
-
             firebase_save_guild_setting(str(guild.id), 'verified_role_id', str(verified_role.id))
             firebase_save_guild_setting(str(guild.id), 'unverified_role_id', str(unverified_role.id))
             firebase_save_guild_setting(str(guild.id), 'verification_channel_id', str(channel.id))
 
             logger.info(f"✅ Guild settings saved to Firebase for {guild.name}")
-
-            # ─── LOCKDOWN ──────────────────────────────────────────────────
 
             for ch in guild.channels:
                 try:
@@ -1121,7 +1115,6 @@ class VerifyBot(commands.Bot):
 # ═════════════════════════════════════════════════════════════════════════════
 
 login_attempts = {}
-from datetime import datetime, timedelta
 
 @flask_app.route('/superadmin')
 def superadmin_login():
