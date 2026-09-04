@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🔧 {{ guild.name }}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0a0a0f; color: #fff; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .header { display: flex; justify-content: space-between; align-items: center; padding: 20px 0; border-bottom: 1px solid #333; margin-bottom: 30px; flex-wrap: wrap; gap: 15px; }
+        .header h1 { font-size: 28px; background: linear-gradient(135deg, #ff4444, #ff6b6b); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .back-btn { padding: 10px 20px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; color: #fff; text-decoration: none; }
+        .tabs { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+        .tab { padding: 10px 20px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); border-radius: 10px; cursor: pointer; }
+        .tab.active { background: rgba(255,50,50,0.15); border-color: #ff4444; color: #ff6b6b; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .section { background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); border-radius: 16px; padding: 24px; margin-bottom: 24px; }
+        .section h2 { font-size: 18px; margin-bottom: 16px; color: rgba(255,255,255,0.8); }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th { text-align: left; padding: 12px; color: rgba(255,255,255,0.3); border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 10px; text-transform: uppercase; }
+        td { padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); }
+        .btn { padding: 6px 14px; border: none; border-radius: 6px; font-size: 12px; cursor: pointer; font-weight: 600; }
+        .btn-ban { background: #ff4444; color: #fff; }
+        .btn-ban:hover { background: #cc0000; }
+        .btn-kick { background: #ff8800; color: #fff; }
+        .btn-kick:hover { background: #cc6600; }
+        .btn-mute { background: #ffaa00; color: #000; }
+        .btn-unmute { background: #4CAF50; color: #fff; }
+        .btn-role { background: #5865F2; color: #fff; }
+        .btn-role:hover { background: #4752c4; }
+        .btn-sm { padding: 4px 10px; font-size: 11px; }
+        .role-tag { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 11px; margin: 2px; background: rgba(255,255,255,0.05); }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-bottom: 20px; }
+        .stat-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; padding: 16px; text-align: center; }
+        .stat-number { font-size: 2em; font-weight: 800; color: #ff6b6b; }
+        .stat-label { font-size: 12px; color: rgba(255,255,255,0.4); }
+        .member-avatar { width: 32px; height: 32px; border-radius: 50%; vertical-align: middle; margin-right: 8px; }
+        .search-box { padding: 10px 16px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; color: #fff; width: 100%; max-width: 300px; margin-bottom: 16px; }
+        @media (max-width: 768px) { .tabs { flex-direction: column; } table { font-size: 11px; } td, th { padding: 8px; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1>🔧 {{ guild.name }}</h1>
+                <div style="font-size:13px;color:rgba(255,255,255,0.3);">Guild ID: {{ guild.id }}</div>
+            </div>
+            <div>
+                <a href="/superadmin-dashboard.html" class="back-btn">← Back to Dashboard</a>
+            </div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card"><div class="stat-number">{{ total_members }}</div><div class="stat-label">Members</div></div>
+            <div class="stat-card"><div class="stat-number">{{ roles|length }}</div><div class="stat-label">Roles</div></div>
+            <div class="stat-card"><div class="stat-number">{{ channels|length }}</div><div class="stat-label">Channels</div></div>
+            <div class="stat-card"><div class="stat-number">{{ invites|length }}</div><div class="stat-label">Invites</div></div>
+        </div>
+
+        <div class="tabs">
+            <div class="tab active" onclick="showTab('members')">👥 Members</div>
+            <div class="tab" onclick="showTab('roles')">🎭 Roles</div>
+            <div class="tab" onclick="showTab('channels')">📝 Channels</div>
+            <div class="tab" onclick="showTab('invites')">🔗 Invites</div>
+        </div>
+
+        <!-- MEMBERS TAB -->
+        <div id="tab-members" class="tab-content active">
+            <div class="section">
+                <h2>👥 Members ({{ total_members }})</h2>
+                <input type="text" class="search-box" id="memberSearch" placeholder="Search members..." onkeyup="searchMembers()">
+                <div style="overflow-x:auto;">
+                    <table id="memberTable">
+                        <thead><tr><th>User</th><th>ID</th><th>Joined</th><th>Roles</th><th>Actions</th></tr></thead>
+                        <tbody>
+                            {% for member in members %}
+                            <tr>
+                                <td><img class="member-avatar" src="{{ member.avatar }}"> <strong>{{ member.name }}</strong></td>
+                                <td style="font-family:monospace;font-size:11px;">{{ member.id }}</td>
+                                <td>{{ member.joined_at }}</td>
+                                <td>{% for role in member.roles %}<span class="role-tag">{{ role.name }}</span>{% endfor %}</td>
+                                <td>
+                                    <button class="btn btn-ban btn-sm" onclick="action('ban', '{{ guild.id }}', '{{ member.id }}')">Ban</button>
+                                    <button class="btn btn-kick btn-sm" onclick="action('kick', '{{ guild.id }}', '{{ member.id }}')">Kick</button>
+                                    <button class="btn btn-mute btn-sm" onclick="action('mute', '{{ guild.id }}', '{{ member.id }}')">Mute</button>
+                                    <button class="btn btn-unmute btn-sm" onclick="action('unmute', '{{ guild.id }}', '{{ member.id }}')">Unmute</button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ROLES TAB -->
+        <div id="tab-roles" class="tab-content">
+            <div class="section">
+                <h2>🎭 Roles</h2>
+                <div style="margin-bottom:16px;">
+                    <input type="text" id="roleName" placeholder="Role name" style="padding:8px 12px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:8px;color:#fff;margin-right:8px;">
+                    <input type="color" id="roleColor" value="#5865F2" style="padding:4px;border-radius:8px;background:transparent;border:1px solid rgba(255,255,255,0.08);">
+                    <button class="btn btn-role" onclick="createRole('{{ guild.id }}')">+ Create Role</button>
+                </div>
+                <table>
+                    <thead><tr><th>Name</th><th>Color</th><th>ID</th><th>Actions</th></tr></thead>
+                    <tbody>
+                        {% for role in roles %}
+                        <tr>
+                            <td><span class="role-tag" style="background:#{{ '%06x' % role.color }};color:#fff;">{{ role.name }}</span></td>
+                            <td>#{{ '%06x' % role.color }}</td>
+                            <td style="font-family:monospace;font-size:11px;">{{ role.id }}</td>
+                            <td>
+                                <button class="btn btn-ban btn-sm" onclick="deleteRole('{{ guild.id }}', '{{ role.id }}')">Delete</button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- CHANNELS TAB -->
+        <div id="tab-channels" class="tab-content">
+            <div class="section">
+                <h2>📝 Channels</h2>
+                <table>
+                    <thead><tr><th>Name</th><th>Type</th><th>ID</th></tr></thead>
+                    <tbody>
+                        {% for channel in channels %}
+                        <tr><td>#{{ channel.name }}</td><td>{{ channel.type }}</td><td style="font-family:monospace;font-size:11px;">{{ channel.id }}</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- INVITES TAB -->
+        <div id="tab-invites" class="tab-content">
+            <div class="section">
+                <h2>🔗 Invites</h2>
+                <table>
+                    <thead><tr><th>Code</th><th>Uses</th><th>Max Uses</th><th>Created</th></tr></thead>
+                    <tbody>
+                        {% for invite in invites %}
+                        <tr><td>{{ invite.code }}</td><td>{{ invite.uses }}</td><td>{{ invite.max_uses }}</td><td>{{ invite.created_at }}</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function showTab(tab) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+            document.getElementById('tab-' + tab).classList.add('active');
+            document.querySelector(`.tab[onclick*="${tab}"]`).classList.add('active');
+        }
+
+        function searchMembers() {
+            const input = document.getElementById('memberSearch').value.toLowerCase();
+            const rows = document.querySelectorAll('#memberTable tbody tr');
+            rows.forEach(row => {
+                row.style.display = row.textContent.toLowerCase().includes(input) ? '' : 'none';
+            });
+        }
+
+        function action(type, guildId, userId) {
+            const reason = prompt('Reason for ' + type + '?');
+            if (!reason && reason !== '') return;
+            fetch('/api/' + type, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ guild_id: guildId, user_id: userId, reason: reason || 'No reason' })
+            })
+            .then(r => r.json())
+            .then(data => {
+                alert(data.success ? '✅ ' + data.message : '❌ ' + data.error);
+                location.reload();
+            })
+            .catch(() => alert('❌ Error!'));
+        }
+
+        function createRole(guildId) {
+            const name = document.getElementById('roleName').value;
+            const color = document.getElementById('roleColor').value;
+            if (!name) { alert('Enter role name!'); return; }
+            fetch('/api/role-create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ guild_id: guildId, name: name, color: color })
+            })
+            .then(r => r.json())
+            .then(data => {
+                alert(data.success ? '✅ ' + data.message : '❌ ' + data.error);
+                location.reload();
+            })
+            .catch(() => alert('❌ Error!'));
+        }
+
+        function deleteRole(guildId, roleId) {
+            if (!confirm('Delete this role?')) return;
+            fetch('/api/role-delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ guild_id: guildId, role_id: roleId })
+            })
+            .then(r => r.json())
+            .then(data => {
+                alert(data.success ? '✅ ' + data.message : '❌ ' + data.error);
+                location.reload();
+            })
+            .catch(() => alert('❌ Error!'));
+        }
+    </script>
+</body>
+</html>
