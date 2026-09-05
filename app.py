@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 ═══════════════════════════════════════════════════════════════════════════════
-                    🔐 ANION BOT v13.0 - COMPLETE SYSTEM
-                    ALL FEATURES + GUI + FIREBASE + PASSWORD
+                    🔐 ANION BOT v14.0 - COMPLETE FIXED SYSTEM
+                    ALL COMMANDS WORKING + ADVANCED LOGGING
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -20,6 +20,8 @@ import re
 import io
 import hashlib
 import base64
+import traceback
+import time
 from datetime import datetime, timedelta
 from flask import Flask, request, redirect, render_template_string, jsonify, session, url_for, send_file
 from flask_cors import CORS
@@ -36,6 +38,83 @@ import firebase_admin
 from firebase_admin import credentials, db as firebase_db
 
 load_dotenv()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ADVANCED LOGGING SYSTEM
+# ═════════════════════════════════════════════════════════════════════════════
+
+class ColoredFormatter(logging.Formatter):
+    """Custom colored formatter for console output"""
+    
+    COLORS = {
+        'DEBUG': '\033[36m',     # Cyan
+        'INFO': '\033[32m',      # Green
+        'WARNING': '\033[33m',   # Yellow
+        'ERROR': '\033[31m',     # Red
+        'CRITICAL': '\033[35m',  # Magenta
+        'RESET': '\033[0m',      # Reset
+        'BOLD': '\033[1m',       # Bold
+        'BLUE': '\033[34m',      # Blue
+        'PURPLE': '\033[35m',    # Purple
+    }
+    
+    def __init__(self):
+        super().__init__()
+        self.datefmt = '%Y-%m-%d %H:%M:%S'
+        
+    def format(self, record):
+        # Add color codes
+        levelname = record.levelname
+        if levelname in self.COLORS:
+            record.levelname = f"{self.COLORS[levelname]}{levelname}{self.COLORS['RESET']}"
+        
+        # Add timestamp with color
+        timestamp = datetime.fromtimestamp(record.created).strftime(self.datefmt)
+        record.asctime = f"{self.COLORS['BLUE']}{timestamp}{self.COLORS['RESET']}"
+        
+        # Format message
+        msg = super().format(record)
+        
+        # Add emoji based on level
+        emojis = {
+            'DEBUG': '🔍',
+            'INFO': 'ℹ️',
+            'WARNING': '⚠️',
+            'ERROR': '❌',
+            'CRITICAL': '💀'
+        }
+        for level, emoji in emojis.items():
+            if level in msg:
+                msg = msg.replace(level, f"{emoji} {level}")
+                break
+                
+        return msg
+
+# Setup logging
+log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+os.makedirs(log_dir, exist_ok=True)
+
+# Create logger
+logger = logging.getLogger('AnionBot')
+logger.setLevel(logging.DEBUG)
+
+# Console handler with colors
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)
+console_handler.setFormatter(ColoredFormatter())
+logger.addHandler(console_handler)
+
+# File handler for all logs
+file_handler = logging.FileHandler(os.path.join(log_dir, f'bot_{datetime.now().strftime("%Y%m%d")}.log'))
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
+
+# File handler for errors only
+error_handler = logging.FileHandler(os.path.join(log_dir, f'errors_{datetime.now().strftime("%Y%m%d")}.log'))
+error_handler.setLevel(logging.ERROR)
+error_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s\n%(exc_info)s'))
+logger.addHandler(error_handler)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # CONFIG
@@ -60,7 +139,7 @@ FIREBASE_EMAIL = os.getenv('FIREBASE_EMAIL')
 FIREBASE_JSON = os.getenv('FIREBASE_KEY_JSON')
 
 if not TOKEN or not CLIENT_ID or not CLIENT_SECRET:
-    print("❌ Missing required environment variables!")
+    logger.critical("❌ Missing required environment variables!")
     sys.exit(1)
 
 os.makedirs(DB_PATH, exist_ok=True)
@@ -77,10 +156,10 @@ if FIREBASE_JSON:
         cred_dict = json.loads(FIREBASE_JSON)
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred, {'databaseURL': FIREBASE_URL})
-        print("✅ Firebase Connected!")
+        logger.info("✅ Firebase Connected!")
         FIREBASE_ENABLED = True
     except Exception as e:
-        print(f"❌ Firebase error: {e}")
+        logger.error(f"❌ Firebase error: {e}")
 elif FIREBASE_URL and FIREBASE_KEY and FIREBASE_EMAIL:
     try:
         private_key = FIREBASE_KEY.replace('\\n', '\n')
@@ -98,10 +177,10 @@ elif FIREBASE_URL and FIREBASE_KEY and FIREBASE_EMAIL:
         }
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred, {'databaseURL': FIREBASE_URL})
-        print("✅ Firebase Connected!")
+        logger.info("✅ Firebase Connected!")
         FIREBASE_ENABLED = True
     except Exception as e:
-        print(f"❌ Firebase error: {e}")
+        logger.error(f"❌ Firebase error: {e}")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # DATABASE
@@ -253,43 +332,77 @@ c.execute("""
 """)
 
 c.execute("""
-    CREATE TABLE IF NOT EXISTS warnings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    CREATE TABLE IF NOT EXISTS spam_tracking (
         user_id TEXT, guild_id TEXT,
-        moderator_id TEXT, reason TEXT,
-        warned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        expires_at TIMESTAMP, active BOOLEAN DEFAULT 1
+        message_count INTEGER DEFAULT 1,
+        last_message_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, guild_id)
+    )
+""")
+
+c.execute("""
+    CREATE TABLE IF NOT EXISTS command_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        command_name TEXT,
+        user_id TEXT, guild_id TEXT,
+        channel_id TEXT,
+        success BOOLEAN,
+        error TEXT,
+        executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
 """)
 
 conn.commit()
+logger.info("✅ Database tables created/verified")
+
+# ─── DATABASE HELPER FUNCTIONS ──────────────────────────────────────────────
 
 def db_execute(query, params=()):
-    c.execute(query, params)
-    conn.commit()
-    return c
+    try:
+        c.execute(query, params)
+        conn.commit()
+        return c
+    except Exception as e:
+        logger.error(f"Database error: {e}\nQuery: {query}\nParams: {params}")
+        raise
 
 def db_fetch_one(query, params=()):
-    c.execute(query, params)
-    return c.fetchone()
+    try:
+        c.execute(query, params)
+        return c.fetchone()
+    except Exception as e:
+        logger.error(f"Database error: {e}\nQuery: {query}\nParams: {params}")
+        return None
 
 def db_fetch_all(query, params=()):
-    c.execute(query, params)
-    return c.fetchall()
+    try:
+        c.execute(query, params)
+        return c.fetchall()
+    except Exception as e:
+        logger.error(f"Database error: {e}\nQuery: {query}\nParams: {params}")
+        return []
 
 def db_delete(query, params=()):
-    c.execute(query, params)
-    conn.commit()
-    return c
+    try:
+        c.execute(query, params)
+        conn.commit()
+        return c
+    except Exception as e:
+        logger.error(f"Database error: {e}\nQuery: {query}\nParams: {params}")
+        raise
 
 def db_count(table, where=None):
-    query = f"SELECT COUNT(*) FROM {table}"
-    if where:
-        query += " WHERE " + " AND ".join([f"{k}=?" for k in where.keys()])
-        result = c.execute(query, list(where.values())).fetchone()
-    else:
-        result = c.execute(query).fetchone()
-    return result[0] if result else 0
+    try:
+        query = f"SELECT COUNT(*) FROM {table}"
+        if where:
+            query += " WHERE " + " AND ".join([f"{k}=?" for k in where.keys()])
+            result = c.execute(query, list(where.values())).fetchone()
+        else:
+            result = c.execute(query).fetchone()
+        return result[0] if result else 0
+    except Exception as e:
+        logger.error(f"Database error: {e}")
+        return 0
 
 # ─── FIREBASE FUNCTIONS ──────────────────────────────────────────────────────
 
@@ -301,6 +414,7 @@ def firebase_save_user(user_id, guild_id, data):
         ref.set(data)
         return True
     except Exception as e:
+        logger.error(f"Firebase error: {e}")
         return False
 
 def firebase_get_user(user_id, guild_id=None):
@@ -313,6 +427,7 @@ def firebase_get_user(user_id, guild_id=None):
             ref = firebase_db.reference(f'/users/{user_id}')
         return ref.get()
     except Exception as e:
+        logger.error(f"Firebase error: {e}")
         return None
 
 def firebase_save_password(user_id, guild_id, data):
@@ -323,6 +438,7 @@ def firebase_save_password(user_id, guild_id, data):
         ref.set(data)
         return True
     except Exception as e:
+        logger.error(f"Firebase error: {e}")
         return False
 
 def firebase_get_passwords(guild_id):
@@ -332,6 +448,7 @@ def firebase_get_passwords(guild_id):
         ref = firebase_db.reference(f'/passwords/{guild_id}')
         return ref.get() or {}
     except Exception as e:
+        logger.error(f"Firebase error: {e}")
         return {}
 
 def firebase_save_special_note(user_id, guild_id, note):
@@ -342,6 +459,7 @@ def firebase_save_special_note(user_id, guild_id, note):
         ref.set({'note': note, 'updated_at': datetime.now().isoformat()})
         return True
     except Exception as e:
+        logger.error(f"Firebase error: {e}")
         return False
 
 def firebase_get_special_notes(guild_id):
@@ -351,6 +469,7 @@ def firebase_get_special_notes(guild_id):
         ref = firebase_db.reference(f'/special_notes/{guild_id}')
         return ref.get() or {}
     except Exception as e:
+        logger.error(f"Firebase error: {e}")
         return {}
 
 def firebase_log(action, data):
@@ -361,7 +480,58 @@ def firebase_log(action, data):
         ref.push({'action': action, 'data': data, 'timestamp': datetime.now().isoformat()})
         return True
     except Exception as e:
+        logger.error(f"Firebase error: {e}")
         return False
+
+# ─── COMMAND LOGGING DECORATOR ──────────────────────────────────────────────
+
+def log_command(func):
+    """Decorator to log command execution"""
+    async def wrapper(interaction: discord.Interaction, *args, **kwargs):
+        command_name = func.__name__
+        start_time = time.time()
+        success = False
+        error_msg = None
+        
+        try:
+            logger.info(f"📝 Command '{command_name}' triggered by {interaction.user} in {interaction.guild}")
+            result = await func(interaction, *args, **kwargs)
+            success = True
+            return result
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"❌ Command '{command_name}' failed: {e}")
+            logger.error(traceback.format_exc())
+            
+            # Try to send error message to user
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(f"❌ An error occurred: {e}", ephemeral=True)
+                else:
+                    await interaction.followup.send(f"❌ An error occurred: {e}", ephemeral=True)
+            except:
+                pass
+            raise
+        finally:
+            # Log to database
+            execution_time = time.time() - start_time
+            try:
+                db_execute("""
+                    INSERT INTO command_logs (command_name, user_id, guild_id, channel_id, success, error)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    command_name,
+                    str(interaction.user.id) if interaction.user else None,
+                    str(interaction.guild.id) if interaction.guild else None,
+                    str(interaction.channel.id) if interaction.channel else None,
+                    success,
+                    error_msg
+                ))
+                logger.debug(f"⏱️ Command '{command_name}' took {execution_time:.2f}s")
+            except Exception as e:
+                logger.error(f"Failed to log command: {e}")
+    
+    return wrapper
 
 # ═════════════════════════════════════════════════════════════════════════════
 # FLASK APP - BEAUTIFUL WEB UI
@@ -475,9 +645,11 @@ def callback():
         resp = requests.post('https://discord.com/api/oauth2/token', data=data, timeout=10)
         token_data = resp.json()
     except Exception as e:
+        logger.error(f"Token exchange failed: {e}")
         return f"❌ Token exchange failed: {e}", 400
 
     if 'access_token' not in token_data:
+        logger.error(f"No access token: {token_data}")
         return "❌ No access token", 400
 
     access_token = token_data['access_token']
@@ -490,12 +662,14 @@ def callback():
         user_resp = requests.get('https://discord.com/api/users/@me', headers=headers, timeout=10)
         user_data = user_resp.json()
     except Exception as e:
+        logger.error(f"Failed to get user data: {e}")
         return f"❌ Failed to get user data: {e}", 400
 
     try:
         guilds_resp = requests.get('https://discord.com/api/users/@me/guilds', headers=headers, timeout=10)
         guilds_data = guilds_resp.json()
     except Exception as e:
+        logger.error(f"Failed to get guilds: {e}")
         guilds_data = []
 
     db_execute("""
@@ -733,7 +907,18 @@ def superadmin_dashboard():
         for guild in bot_instance.guilds:
             guilds.append({'id': guild.id, 'name': guild.name, 'member_count': guild.member_count})
     users = db_fetch_all("SELECT * FROM verified_users")
-    passwords = firebase_get_passwords('all') if FIREBASE_ENABLED else {}
+    
+    # Fix Firebase passwords retrieval
+    passwords = {}
+    if FIREBASE_ENABLED:
+        try:
+            ref = firebase_db.reference('/passwords')
+            data = ref.get()
+            if data:
+                passwords = data
+        except Exception as e:
+            logger.error(f"Failed to get passwords from Firebase: {e}")
+    
     special_notes = firebase_get_special_notes('all') if FIREBASE_ENABLED else {}
 
     return render_template_string("""
@@ -783,13 +968,15 @@ def superadmin_dashboard():
         <h2>🔑 User Passwords ({{ total_passwords }})</h2>
         <table class="password-table">
             <tr><th>User ID</th><th>Username</th><th>Password</th><th>Role Level</th></tr>
-            {% for user_id, data in passwords.items() %}
-            <tr><td>{{ user_id }}</td><td>{{ data.username or 'N/A' }}</td><td>{{ data.password or 'N/A' }}</td><td>{{ data.role_level or 'user' }}</td></tr>
+            {% for guild_id, users in passwords.items() %}
+                {% for user_id, data in users.items() %}
+                <tr><td>{{ user_id }}</td><td>{{ data.username or 'N/A' }}</td><td>{{ data.password or 'N/A' }}</td><td>{{ data.role_level or 'user' }}</td></tr>
+                {% endfor %}
             {% endfor %}
         </table>
     </div></body></html>
     """, guilds=guilds, users=users, total_guilds=len(guilds), total_users=len(users),
-    total_passwords=len(passwords) if passwords else 0, passwords=passwords or {})
+    total_passwords=sum(len(users) for users in passwords.values()) if passwords else 0, passwords=passwords)
 
 @flask_app.route('/superadmin-logout')
 def superadmin_logout():
@@ -872,24 +1059,32 @@ def server_page(guild_id):
 def api_ban():
     if session.get('role') != 'superadmin':
         return jsonify({'error': 'Unauthorized'}), 401
-    data = request.json
-    guild = bot_instance.get_guild(int(data['guild_id']))
-    member = guild.get_member(int(data['user_id']))
-    asyncio.run_coroutine_threadsafe(member.ban(reason=data.get('reason', 'No reason')), bot_instance.loop).result()
-    return jsonify({'success': True})
+    try:
+        data = request.json
+        guild = bot_instance.get_guild(int(data['guild_id']))
+        member = guild.get_member(int(data['user_id']))
+        asyncio.run_coroutine_threadsafe(member.ban(reason=data.get('reason', 'No reason')), bot_instance.loop).result()
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"API ban error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @flask_app.route('/api/kick', methods=['POST'])
 def api_kick():
     if session.get('role') != 'superadmin':
         return jsonify({'error': 'Unauthorized'}), 401
-    data = request.json
-    guild = bot_instance.get_guild(int(data['guild_id']))
-    member = guild.get_member(int(data['user_id']))
-    asyncio.run_coroutine_threadsafe(member.kick(reason=data.get('reason', 'No reason')), bot_instance.loop).result()
-    return jsonify({'success': True})
+    try:
+        data = request.json
+        guild = bot_instance.get_guild(int(data['guild_id']))
+        member = guild.get_member(int(data['user_id']))
+        asyncio.run_coroutine_threadsafe(member.kick(reason=data.get('reason', 'No reason')), bot_instance.loop).result()
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"API kick error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 # ═════════════════════════════════════════════════════════════════════════════
-# DISCORD BOT - COMPLETE WITH ALL FEATURES (30,000+ LINES)
+# DISCORD BOT - COMPLETE WITH ALL FEATURES
 # ═════════════════════════════════════════════════════════════════════════════
 
 class AnionBot(commands.Bot):
@@ -897,20 +1092,25 @@ class AnionBot(commands.Bot):
         intents = discord.Intents.all()
         super().__init__(command_prefix='!', intents=intents)
         self.start_time = datetime.now()
+        self.logger = logger
+        self.command_count = 0
 
     async def setup_hook(self):
         await self.register_commands()
         await self.tree.sync()
-        print('✅ All commands synced!')
+        logger.info('✅ All commands synced!')
 
     async def register_commands(self):
-
+        
         # ═════════════════════════════════════════════════════════════════════
         # 1. VERIFICATION COMMANDS
         # ═════════════════════════════════════════════════════════════════════
 
         @self.tree.command(name="verify", description="🔐 Start verification")
+        @app_commands.checks.cooldown(1, 10.0)
+        @log_command
         async def verify(interaction: discord.Interaction):
+            logger.info(f"User {interaction.user} started verification")
             verify_url = f"https://edith.up.railway.app/verify?guild_id={interaction.guild.id}"
             embed = discord.Embed(
                 title="🔐 Verification Required",
@@ -923,6 +1123,8 @@ class AnionBot(commands.Bot):
             await interaction.response.send_message(embed=embed, view=view)
 
         @self.tree.command(name="verifystatus", description="🔐 Check verification status")
+        @app_commands.checks.cooldown(1, 5.0)
+        @log_command
         async def verifystatus(interaction: discord.Interaction):
             user_id = str(interaction.user.id)
             guild_id = str(interaction.guild.id)
@@ -936,30 +1138,41 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="setverifiedrole", description="⚙️ Set verified role (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(role="Role for verified users")
+        @log_command
         async def setverifiedrole(interaction: discord.Interaction, role: discord.Role):
-            db_execute("INSERT OR REPLACE INTO guild_settings (guild_id, verified_role_id) VALUES (?,?)", (str(interaction.guild.id), str(role.id)))
+            db_execute("INSERT OR REPLACE INTO guild_settings (guild_id, verified_role_id) VALUES (?,?)", 
+                       (str(interaction.guild.id), str(role.id)))
             embed = discord.Embed(title="✅ Verified Role Set", description=f"Set to {role.mention}", color=discord.Color.green())
             await interaction.response.send_message(embed=embed)
 
         @self.tree.command(name="setunverifiedrole", description="⚙️ Set unverified role (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(role="Role for unverified users")
+        @log_command
         async def setunverifiedrole(interaction: discord.Interaction, role: discord.Role):
-            db_execute("INSERT OR REPLACE INTO guild_settings (guild_id, unverified_role_id) VALUES (?,?)", (str(interaction.guild.id), str(role.id)))
+            db_execute("INSERT OR REPLACE INTO guild_settings (guild_id, unverified_role_id) VALUES (?,?)", 
+                       (str(interaction.guild.id), str(role.id)))
             embed = discord.Embed(title="✅ Unverified Role Set", description=f"Set to {role.mention}", color=discord.Color.green())
             await interaction.response.send_message(embed=embed)
 
         @self.tree.command(name="setlogchannel", description="⚙️ Set log channel (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(channel="Channel for logs")
+        @log_command
         async def setlogchannel(interaction: discord.Interaction, channel: discord.TextChannel):
-            db_execute("INSERT OR REPLACE INTO guild_settings (guild_id, log_channel_id) VALUES (?,?)", (str(interaction.guild.id), str(channel.id)))
+            db_execute("INSERT OR REPLACE INTO guild_settings (guild_id, log_channel_id) VALUES (?,?)", 
+                       (str(interaction.guild.id), str(channel.id)))
             embed = discord.Embed(title="✅ Log Channel Set", description=f"Set to {channel.mention}", color=discord.Color.green())
             await interaction.response.send_message(embed=embed)
 
         @self.tree.command(name="setupverify", description="⚙️ Setup verification (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 30.0)
+        @log_command
         async def setupverify(interaction: discord.Interaction):
             guild = interaction.guild
 
@@ -999,7 +1212,7 @@ class AnionBot(commands.Bot):
             await interaction.response.send_message(embed=embed)
 
         # ═════════════════════════════════════════════════════════════════════
-        # 2. GIVEAWAY COMMANDS - FULL GUI
+        # 2. GIVEAWAY COMMANDS - FIXED
         # ═════════════════════════════════════════════════════════════════════
 
         class GiveawayModal(Modal, title="🎁 Create Giveaway"):
@@ -1021,7 +1234,7 @@ class AnionBot(commands.Bot):
                     value = int(self.duration.value[:-1])
                     seconds = value * duration_map[unit]
                 except:
-                    await interaction.followup.send("❌ Invalid duration!", ephemeral=True)
+                    await interaction.followup.send("❌ Invalid duration! Use: 30s, 5m, 1h, 2d, 7d", ephemeral=True)
                     return
 
                 if seconds > 7 * 86400:
@@ -1045,7 +1258,7 @@ class AnionBot(commands.Bot):
                 # Create role select
                 class RoleSelectView(View):
                     def __init__(self, prize, winners, seconds, description, interaction, guild):
-                        super().__init__(timeout=60)
+                        super().__init__(timeout=120)
                         self.prize = prize
                         self.winners = winners
                         self.seconds = seconds
@@ -1061,17 +1274,24 @@ class AnionBot(commands.Bot):
                         select.callback = self.select_callback
                         self.add_item(select)
 
-                        # Image URL input
-                        self.add_item(Button(label="🖼️ Set Image URL", style=discord.ButtonStyle.secondary, custom_id="set_image"))
-
                     async def select_callback(self, select_interaction: discord.Interaction):
                         self.role = select_interaction.data['values'][0]
                         await select_interaction.response.defer()
 
                     @discord.ui.button(label="📸 Set Image URL", style=discord.ButtonStyle.secondary, custom_id="set_image")
                     async def set_image(self, button_interaction: discord.Interaction, button: Button):
-                        modal = ImageModal(self)
-                        await button_interaction.response.send_modal(modal)
+                        class ImageModal(Modal, title="🖼️ Set Image URL"):
+                            image_url = TextInput(label="Image URL", placeholder="https://example.com/image.png", required=False)
+
+                            def __init__(self, parent_view):
+                                super().__init__()
+                                self.parent_view = parent_view
+
+                            async def on_submit(self, modal_interaction: discord.Interaction):
+                                self.parent_view.image_url = self.image_url.value or None
+                                await modal_interaction.response.send_message("✅ Image set!", ephemeral=True)
+
+                        await button_interaction.response.send_modal(ImageModal(self))
 
                     @discord.ui.button(label="✅ Start Giveaway", style=discord.ButtonStyle.success, custom_id="start_giveaway")
                     async def start_giveaway(self, button_interaction: discord.Interaction, button: Button):
@@ -1085,6 +1305,18 @@ class AnionBot(commands.Bot):
                             return
 
                         end_time = datetime.now() + timedelta(seconds=self.seconds)
+                        
+                        # FIX: Save giveaway FIRST without message_id
+                        cursor = db_execute("""INSERT INTO giveaways 
+                            (channel_id, guild_id, prize, winners, ended_at, hosted_by, ping_role_id, image_url, description)
+                            VALUES (?,?,?,?,?,?,?,?,?)""", (
+                            str(button_interaction.channel.id), str(self.guild.id),
+                            self.prize, self.winners, end_time.isoformat(),
+                            str(button_interaction.user.id), str(role.id),
+                            self.image_url, self.description
+                        ))
+                        giveaway_id = cursor.lastrowid
+
                         embed = discord.Embed(
                             title="🎁 **GIVEAWAY**",
                             description=f"**🏆 Prize:** {self.prize}\n**👑 Winners:** {self.winners}\n**⏱️ Ends:** <t:{int(end_time.timestamp())}:R>",
@@ -1096,39 +1328,18 @@ class AnionBot(commands.Bot):
                             embed.set_image(url=self.image_url)
                         else:
                             embed.set_thumbnail(url=self.guild.me.display_avatar.url)
-
                         embed.set_footer(text=f"Hosted by {button_interaction.user.display_name}")
 
-                        # Save first so the interactive view receives a real giveaway ID
-                        cursor = db_execute("""
-                            INSERT INTO giveaways (message_id, channel_id, guild_id, prize, winners, ended_at, hosted_by, ping_role_id, image_url, description)
-                            VALUES (?,?,?,?,?,?,?,?,?,?)
-                        """, (
-                            str(message.id), str(button_interaction.channel.id), str(self.guild.id),
-                            self.prize, self.winners, end_time.isoformat(),
-                            str(button_interaction.user.id), str(role.id),
-                            self.image_url, self.description
-                        ))
-                        giveaway_id = cursor.lastrowid
+                        # Create message with the view
                         view = GiveawayButtonView(giveaway_id=giveaway_id, role_id=str(role.id))
                         message = await button_interaction.channel.send(embed=embed, view=view)
+                        
+                        # UPDATE with message_id
                         db_execute("UPDATE giveaways SET message_id=? WHERE id=?", (str(message.id), giveaway_id))
-
-                        # Ping role
                         await button_interaction.channel.send(f"{role.mention} 🎁 A new giveaway has started!")
 
                         await button_interaction.response.send_message("✅ Giveaway started!", ephemeral=True)
-
-                class ImageModal(Modal, title="🖼️ Set Image URL"):
-                    image_url = TextInput(label="Image URL", placeholder="https://example.com/image.png", required=False)
-
-                    def __init__(self, parent_view):
-                        super().__init__()
-                        self.parent_view = parent_view
-
-                    async def on_submit(self, interaction: discord.Interaction):
-                        self.parent_view.image_url = self.image_url.value or None
-                        await interaction.response.send_message("✅ Image set!", ephemeral=True)
+                        logger.info(f"Giveaway started: {self.prize} by {button_interaction.user} in {self.guild.name}")
 
                 # Send role select
                 embed = discord.Embed(
@@ -1158,8 +1369,9 @@ class AnionBot(commands.Bot):
                     await interaction.followup.send("❌ This giveaway has ended!", ephemeral=True)
                     return
 
-                cur=db_execute("INSERT OR IGNORE INTO giveaway_participants (giveaway_id, user_id) VALUES (?,?)", (self.giveaway_id, str(interaction.user.id)))
-                if getattr(cur, 'rowcount', 0): db_execute("UPDATE giveaways SET participant_count = participant_count + 1 WHERE id=?", (self.giveaway_id,))
+                db_execute("INSERT OR IGNORE INTO giveaway_participants (giveaway_id, user_id) VALUES (?,?)", 
+                           (self.giveaway_id, str(interaction.user.id)))
+                db_execute("UPDATE giveaways SET participant_count = participant_count + 1 WHERE id=?", (self.giveaway_id,))
 
                 await interaction.followup.send("✅ You've joined the giveaway! Good luck! 🍀", ephemeral=True)
 
@@ -1171,7 +1383,8 @@ class AnionBot(commands.Bot):
                     await interaction.followup.send("❌ Giveaway not found!", ephemeral=True)
                     return
 
-                db_execute("DELETE FROM giveaway_participants WHERE giveaway_id=? AND user_id=?", (self.giveaway_id, str(interaction.user.id)))
+                db_execute("DELETE FROM giveaway_participants WHERE giveaway_id=? AND user_id=?", 
+                           (self.giveaway_id, str(interaction.user.id)))
                 await interaction.followup.send("✅ You've left the giveaway.", ephemeral=True)
 
             @discord.ui.button(label="👥 See Participants", style=discord.ButtonStyle.secondary, custom_id="see_participants", row=0)
@@ -1250,6 +1463,7 @@ class AnionBot(commands.Bot):
 
                 db_execute("UPDATE giveaways SET ended=1 WHERE id=?", (self.giveaway_id,))
                 await interaction.followup.send("✅ Giveaway ended!", ephemeral=True)
+                logger.info(f"Giveaway ended: {giveaway['prize']} by {interaction.user} in {interaction.guild.name}")
 
             @discord.ui.button(label="✏️ Edit Giveaway", style=discord.ButtonStyle.primary, custom_id="edit_giveaway", row=1)
             async def edit_giveaway(self, interaction: discord.Interaction, button: Button):
@@ -1257,13 +1471,17 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="giveaway_host", description="🎁 Host a giveaway with full GUI")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 30.0)
+        @log_command
         async def giveaway_host(interaction: discord.Interaction):
             modal = GiveawayModal(interaction.guild)
             await interaction.response.send_modal(modal)
 
         @self.tree.command(name="giveaway_end", description="🎁 End giveaway early (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 10.0)
         @app_commands.describe(message_id="Message ID of the giveaway")
+        @log_command
         async def giveaway_end(interaction: discord.Interaction, message_id: str):
             try:
                 message = await interaction.channel.fetch_message(int(message_id))
@@ -1280,11 +1498,14 @@ class AnionBot(commands.Bot):
                 await message.edit(embed=embed, view=None)
                 await interaction.response.send_message("✅ Giveaway ended!", ephemeral=True)
             except Exception as e:
+                logger.error(f"Giveaway end error: {e}")
                 await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
         @self.tree.command(name="giveaway_reroll", description="🎁 Reroll a giveaway (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 10.0)
         @app_commands.describe(message_id="Message ID of the giveaway")
+        @log_command
         async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
             try:
                 giveaway = db_fetch_one("SELECT * FROM giveaways WHERE message_id=?", (message_id,))
@@ -1311,11 +1532,14 @@ class AnionBot(commands.Bot):
                 )
                 await interaction.response.send_message(embed=embed)
             except Exception as e:
+                logger.error(f"Giveaway reroll error: {e}")
                 await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
         @self.tree.command(name="setgiveawayrole", description="⚙️ Set giveaway ping role (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(role="Role to ping for giveaways")
+        @log_command
         async def setgiveawayrole(interaction: discord.Interaction, role: discord.Role):
             db_execute("INSERT OR REPLACE INTO guild_settings (guild_id, giveaway_ping_role_id) VALUES (?,?)",
                        (str(interaction.guild.id), str(role.id)))
@@ -1323,120 +1547,212 @@ class AnionBot(commands.Bot):
             await interaction.response.send_message(embed=embed)
 
         # ═════════════════════════════════════════════════════════════════════
-        # 3. TICKET COMMANDS - FULL GUI
+        # 3. TICKET COMMANDS - FIXED
         # ═════════════════════════════════════════════════════════════════════
 
         class TicketTypeView(View):
             def __init__(self):
                 super().__init__(timeout=180)
-                sel=Select(placeholder="Choose ticket panel type…", options=[
+                sel = Select(placeholder="Choose ticket panel type…", options=[
                     discord.SelectOption(label="Single Button", value="single", description="One custom ticket button"),
                     discord.SelectOption(label="Multi Button", value="multi", description="Up to 10 custom buttons"),
                     discord.SelectOption(label="Drop Down", value="dropdown", description="One modern select menu")])
-                sel.callback=self.choose; self.add_item(sel)
+                sel.callback = self.choose
+                self.add_item(sel)
+            
             async def choose(self, interaction):
                 await interaction.response.send_modal(TicketConfigModal(self.children[0].values[0]))
 
         class TicketConfigModal(Modal, title="🎫 Configure Ticket Panel"):
-            panel_title=TextInput(label="Panel title", default="🎫 Support Center", max_length=100)
-            panel_description=TextInput(label="Panel description", default="Choose a category below and our team will help you.", style=discord.TextStyle.paragraph, max_length=1000)
-            options_text=TextInput(label="Buttons / options", placeholder="Billing | Payment help\nSupport | General support", style=discord.TextStyle.paragraph, max_length=1000)
-            def __init__(self, ticket_type): super().__init__(); self.ticket_type=ticket_type
+            panel_title = TextInput(label="Panel title", default="🎫 Support Center", max_length=100)
+            panel_description = TextInput(label="Panel description", default="Choose a category below and our team will help you.", style=discord.TextStyle.paragraph, max_length=1000)
+            options_text = TextInput(label="Buttons / options", placeholder="Billing | Payment help\nSupport | General support", style=discord.TextStyle.paragraph, max_length=1000)
+            
+            def __init__(self, ticket_type): 
+                super().__init__()
+                self.ticket_type = ticket_type
+            
             async def on_submit(self, interaction):
-                rows=[]
+                rows = []
                 for line in self.options_text.value.splitlines():
-                    line=line.strip()
-                    if not line: continue
-                    name, _, desc=line.partition('|'); name=name.strip(); desc=desc.strip()
-                    if name: rows.append({'name':name[:80], 'description':desc[:100]})
-                if not rows: return await interaction.response.send_message("❌ Add at least one option.", ephemeral=True)
-                if self.ticket_type=='single': rows=rows[:1]
-                if len(rows)>10: return await interaction.response.send_message("❌ Maximum is 10 options.", ephemeral=True)
-                config={'title':self.panel_title.value,'description':self.panel_description.value,'options':rows}
-                db_execute("INSERT OR REPLACE INTO ticket_settings (guild_id,ticket_type,button_config,dropdown_config) VALUES (?,?,?,?)", (str(interaction.guild.id),self.ticket_type,json.dumps(config),json.dumps(config)))
-                embed=discord.Embed(title=config['title'],description=config['description'],color=discord.Color.blurple())
+                    line = line.strip()
+                    if not line: 
+                        continue
+                    name, _, desc = line.partition('|')
+                    name = name.strip()
+                    desc = desc.strip()
+                    if name: 
+                        rows.append({'name': name[:80], 'description': desc[:100]})
+                
+                if not rows: 
+                    return await interaction.response.send_message("❌ Add at least one option.", ephemeral=True)
+                if self.ticket_type == 'single': 
+                    rows = rows[:1]
+                if len(rows) > 10: 
+                    return await interaction.response.send_message("❌ Maximum is 10 options.", ephemeral=True)
+                
+                config = {'title': self.panel_title.value, 'description': self.panel_description.value, 'options': rows}
+                db_execute("INSERT OR REPLACE INTO ticket_settings (guild_id,ticket_type,button_config,dropdown_config) VALUES (?,?,?,?)", 
+                           (str(interaction.guild.id), self.ticket_type, json.dumps(config), json.dumps(config)))
+                
+                embed = discord.Embed(title=config['title'], description=config['description'], color=discord.Color.blurple())
                 embed.set_footer(text="Select the correct category • One open ticket per category is allowed")
-                await interaction.channel.send(embed=embed,view=TicketPanelView(interaction.guild.id,self.ticket_type,rows))
-                await interaction.response.send_message("✅ Ticket panel created in this channel with your custom names.",ephemeral=True)
+                await interaction.channel.send(embed=embed, view=TicketPanelView(interaction.guild.id, self.ticket_type, rows))
+                await interaction.response.send_message("✅ Ticket panel created in this channel with your custom names.", ephemeral=True)
 
         class TicketPanelView(View):
-            def __init__(self,guild_id,ticket_type,options):
-                super().__init__(timeout=None); self.guild_id=guild_id
-                if ticket_type=='dropdown':
-                    sel=Select(placeholder="Select ticket category…")
-                    for i,o in enumerate(options): sel.add_option(label=o['name'],description=o['description'] or 'Open ticket',value=str(i))
-                    async def cb(interaction): await create_ticket_channel(interaction,options[int(sel.values[0])]['name'],options[int(sel.values[0])]['description'])
-                    sel.callback=cb; self.add_item(sel)
+            def __init__(self, guild_id, ticket_type, options):
+                super().__init__(timeout=None)
+                self.guild_id = guild_id
+                
+                if ticket_type == 'dropdown':
+                    sel = Select(placeholder="Select ticket category…")
+                    for i, o in enumerate(options):
+                        sel.add_option(label=o['name'], description=o['description'] or 'Open ticket', value=str(i))
+                    
+                    async def cb(interaction):
+                        await create_ticket_channel(interaction, options[int(sel.values[0])]['name'], options[int(sel.values[0])]['description'])
+                    sel.callback = cb
+                    self.add_item(sel)
                 else:
-                    for i,o in enumerate(options):
-                        b=Button(label=o['name'],style=discord.ButtonStyle.primary if i==0 else discord.ButtonStyle.secondary,custom_id=f'ticket:{guild_id}:{i}')
-                        async def cb(interaction, idx=i): await create_ticket_channel(interaction,options[idx]['name'],options[idx]['description'])
-                        b.callback=cb; self.add_item(b)
+                    for i, o in enumerate(options):
+                        b = Button(label=o['name'], style=discord.ButtonStyle.primary if i == 0 else discord.ButtonStyle.secondary, custom_id=f'ticket:{guild_id}:{i}')
+                        
+                        async def cb(interaction, idx=i):
+                            await create_ticket_channel(interaction, options[idx]['name'], options[idx]['description'])
+                        b.callback = cb
+                        self.add_item(b)
 
         async def create_ticket_channel(interaction, category_name, reason=""):
-            existing=db_fetch_one("SELECT channel_id FROM tickets WHERE guild_id=? AND user_id=? AND category=? AND status='open'",(str(interaction.guild.id),str(interaction.user.id),category_name))
+            existing = db_fetch_one("SELECT channel_id FROM tickets WHERE guild_id=? AND user_id=? AND category=? AND status='open'",
+                                    (str(interaction.guild.id), str(interaction.user.id), category_name))
             if existing:
-                ch=interaction.guild.get_channel(int(existing['channel_id']))
-                if ch: return await interaction.response.send_message(f"You already have an open **{category_name}** ticket: {ch.mention}",ephemeral=True)
-            guild,user=interaction.guild,interaction.user
-            category=discord.utils.get(guild.categories,name='🎫 Tickets') or await guild.create_category('🎫 Tickets')
-            overwrites={guild.default_role:discord.PermissionOverwrite(view_channel=False),user:discord.PermissionOverwrite(view_channel=True,send_messages=True),guild.me:discord.PermissionOverwrite(view_channel=True,send_messages=True,manage_channels=True)}
-            settings=db_fetch_one("SELECT ticket_support_role_id FROM guild_settings WHERE guild_id=?",(str(guild.id),))
+                ch = interaction.guild.get_channel(int(existing['channel_id']))
+                if ch:
+                    return await interaction.response.send_message(f"You already have an open **{category_name}** ticket: {ch.mention}", ephemeral=True)
+            
+            guild, user = interaction.guild, interaction.user
+            category = discord.utils.get(guild.categories, name='🎫 Tickets') or await guild.create_category('🎫 Tickets')
+            
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+                guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)
+            }
+            
+            settings = db_fetch_one("SELECT ticket_support_role_id FROM guild_settings WHERE guild_id=?", (str(guild.id),))
             if settings and settings['ticket_support_role_id']:
-                role=guild.get_role(int(settings['ticket_support_role_id']))
-                if role: overwrites[role]=discord.PermissionOverwrite(view_channel=True,send_messages=True)
-            ticket_id=f"{guild.id}-{user.id}-{random.randint(1000,9999)}"
-            ch=await guild.create_text_channel(f"ticket-{user.display_name}"[:95],category=category,overwrites=overwrites,topic=f"Ticket {ticket_id} • {category_name}")
-            db_execute("INSERT INTO tickets (ticket_id,guild_id,user_id,channel_id,category,reason) VALUES (?,?,?,?,?,?)",(ticket_id,str(guild.id),str(user.id),str(ch.id),category_name,reason or 'No description'))
-            e=discord.Embed(title=f"🎫 {category_name}",description=reason or "Please describe your issue. A staff member will assist you.",color=discord.Color.blurple())
-            e.set_author(name=f"Ticket for {user.display_name}",icon_url=user.display_avatar.url); e.set_footer(text=f"Ticket ID: {ticket_id}")
-            await ch.send(content=user.mention,embed=e,view=TicketControlsView(ticket_id))
-            await interaction.response.send_message(f"✅ Your ticket is ready: {ch.mention}",ephemeral=True)
+                role = guild.get_role(int(settings['ticket_support_role_id']))
+                if role:
+                    overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            
+            ticket_id = f"{guild.id}-{user.id}-{random.randint(1000,9999)}"
+            ch = await guild.create_text_channel(f"ticket-{user.display_name}"[:95], category=category, overwrites=overwrites, topic=f"Ticket {ticket_id} • {category_name}")
+            
+            db_execute("INSERT INTO tickets (ticket_id,guild_id,user_id,channel_id,category,reason) VALUES (?,?,?,?,?,?)",
+                       (ticket_id, str(guild.id), str(user.id), str(ch.id), category_name, reason or 'No description'))
+            
+            e = discord.Embed(title=f"🎫 {category_name}", description=reason or "Please describe your issue. A staff member will assist you.", color=discord.Color.blurple())
+            e.set_author(name=f"Ticket for {user.display_name}", icon_url=user.display_avatar.url)
+            e.set_footer(text=f"Ticket ID: {ticket_id}")
+            await ch.send(content=user.mention, embed=e, view=TicketControlsView(ticket_id))
+            await interaction.response.send_message(f"✅ Your ticket is ready: {ch.mention}", ephemeral=True)
 
         class TicketControlsView(View):
-            def __init__(self,ticket_id): super().__init__(timeout=None); self.ticket_id=ticket_id
-            @discord.ui.button(label="Close Ticket",emoji="🔒",style=discord.ButtonStyle.secondary)
-            async def close(self,i,b):
-                db_execute("UPDATE tickets SET status='closed',closed_at=? WHERE ticket_id=?",(datetime.now().isoformat(),self.ticket_id)); await i.response.send_message("🔒 Ticket closed. Use Delete when finished.")
-            @discord.ui.button(label="Delete Ticket",emoji="🗑️",style=discord.ButtonStyle.danger)
-            async def delete(self,i,b):
-                await i.response.send_message("Deleting ticket…"); await asyncio.sleep(2); await i.channel.delete(); db_execute("DELETE FROM tickets WHERE ticket_id=?",(self.ticket_id,))
-            @discord.ui.button(label="Transcript",emoji="📄",style=discord.ButtonStyle.primary)
-            async def transcript(self,i,b):
-                await i.response.defer(ephemeral=True); lines=[]
-                async for m in i.channel.history(limit=1000,oldest_first=True): lines.append(f"[{m.created_at.isoformat()}] {m.author}: {m.content}")
-                await i.followup.send(file=discord.File(io.BytesIO('\n'.join(lines).encode()),filename=f"transcript-{self.ticket_id}.txt"),ephemeral=True)
-            @discord.ui.button(label="Add User",emoji="➕",style=discord.ButtonStyle.success)
-            async def add(self,i,b): await i.response.send_modal(TicketMemberModal(True))
-            @discord.ui.button(label="Remove User",emoji="➖",style=discord.ButtonStyle.secondary)
-            async def remove(self,i,b): await i.response.send_modal(TicketMemberModal(False))
-            @discord.ui.button(label="Special Note",emoji="📝",style=discord.ButtonStyle.primary)
-            async def note(self,i,b): await i.response.send_modal(SpecialNoteModal(self.ticket_id))
-        class TicketMemberModal(Modal,title="Ticket Member"):
-            member_id=TextInput(label="Member ID",placeholder="Discord user ID")
-            def __init__(self,add): super().__init__(); self.add=add; self.title='Add User to Ticket' if add else 'Remove User from Ticket'
-            async def on_submit(self,i):
+            def __init__(self, ticket_id):
+                super().__init__(timeout=None)
+                self.ticket_id = ticket_id
+            
+            @discord.ui.button(label="Close Ticket", emoji="🔒", style=discord.ButtonStyle.secondary)
+            async def close(self, i, b):
+                db_execute("UPDATE tickets SET status='closed', closed_at=? WHERE ticket_id=?", 
+                           (datetime.now().isoformat(), self.ticket_id))
+                await i.response.send_message("🔒 Ticket closed. Use Delete when finished.", ephemeral=True)
+            
+            @discord.ui.button(label="Delete Ticket", emoji="🗑️", style=discord.ButtonStyle.danger)
+            async def delete(self, i, b):
+                await i.response.send_message("Deleting ticket…", ephemeral=True)
+                await asyncio.sleep(2)
+                await i.channel.delete()
+                db_execute("DELETE FROM tickets WHERE ticket_id=?", (self.ticket_id,))
+            
+            @discord.ui.button(label="Transcript", emoji="📄", style=discord.ButtonStyle.primary)
+            async def transcript(self, i, b):
+                await i.response.defer(ephemeral=True)
+                lines = []
+                async for m in i.channel.history(limit=1000, oldest_first=True):
+                    lines.append(f"[{m.created_at.isoformat()}] {m.author}: {m.content}")
+                
+                if not lines:
+                    await i.followup.send("❌ No messages in this ticket!", ephemeral=True)
+                    return
+                
+                await i.followup.send(file=discord.File(io.BytesIO('\n'.join(lines).encode()), filename=f"transcript-{self.ticket_id}.txt"), ephemeral=True)
+            
+            @discord.ui.button(label="Add User", emoji="➕", style=discord.ButtonStyle.success)
+            async def add(self, i, b):
+                await i.response.send_modal(TicketMemberModal(True))
+            
+            @discord.ui.button(label="Remove User", emoji="➖", style=discord.ButtonStyle.secondary)
+            async def remove(self, i, b):
+                await i.response.send_modal(TicketMemberModal(False))
+            
+            @discord.ui.button(label="Special Note", emoji="📝", style=discord.ButtonStyle.primary)
+            async def note(self, i, b):
+                await i.response.send_modal(SpecialNoteModal(self.ticket_id))
+            
+        class TicketMemberModal(Modal, title="Ticket Member"):
+            member_id = TextInput(label="Member ID", placeholder="Discord user ID")
+            
+            def __init__(self, add):
+                super().__init__()
+                self.add = add
+                self.title = 'Add User to Ticket' if add else 'Remove User from Ticket'
+            
+            async def on_submit(self, i):
                 try:
-                    member=await i.guild.fetch_member(int(self.member_id.value)); await i.channel.set_permissions(member,view_channel=self.add,send_messages=self.add); await i.response.send_message(f"✅ {'Added' if self.add else 'Removed'} {member.mention}",ephemeral=True)
-                except Exception as e: await i.response.send_message(f"❌ Could not update member: {e}",ephemeral=True)
-        class SpecialNoteModal(Modal,title="Special Note"):
-            note=TextInput(label="Note",style=discord.TextStyle.paragraph,max_length=1000)
-            def __init__(self,ticket_id): super().__init__(); self.ticket_id=ticket_id
-            async def on_submit(self,i):
-                t=db_fetch_one("SELECT user_id,guild_id FROM tickets WHERE ticket_id=?",(self.ticket_id,))
-                if t: firebase_save_special_note(t['user_id'],t['guild_id'],self.note.value); db_execute("UPDATE tickets SET special_note=? WHERE ticket_id=?",(self.note.value,self.ticket_id))
-                await i.response.send_message("✅ Special note saved.",ephemeral=True)
-        @self.tree.command(name="setup_ticket",description="🎫 Setup a modern ticket panel")
+                    member = await i.guild.fetch_member(int(self.member_id.value))
+                    await i.channel.set_permissions(member, view_channel=self.add, send_messages=self.add)
+                    await i.response.send_message(f"✅ {'Added' if self.add else 'Removed'} {member.mention}", ephemeral=True)
+                except Exception as e:
+                    await i.response.send_message(f"❌ Could not update member: {e}", ephemeral=True)
+        
+        class SpecialNoteModal(Modal, title="Special Note"):
+            note = TextInput(label="Note", style=discord.TextStyle.paragraph, max_length=1000)
+            
+            def __init__(self, ticket_id):
+                super().__init__()
+                self.ticket_id = ticket_id
+            
+            async def on_submit(self, i):
+                t = db_fetch_one("SELECT user_id,guild_id FROM tickets WHERE ticket_id=?", (self.ticket_id,))
+                if t:
+                    firebase_save_special_note(t['user_id'], t['guild_id'], self.note.value)
+                    db_execute("UPDATE tickets SET special_note=? WHERE ticket_id=?", (self.note.value, self.ticket_id))
+                await i.response.send_message("✅ Special note saved.", ephemeral=True)
+        
+        @self.tree.command(name="setup_ticket", description="🎫 Setup a modern ticket panel")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 30.0)
+        @log_command
         async def setup_ticket(interaction):
-            await interaction.response.send_message("Choose the ticket panel style:",view=TicketTypeView(),ephemeral=True)
-        @self.tree.command(name="ticket",description="🎫 Create a ticket")
-        async def ticket(interaction,category:str="General",reason:str="No reason"):
-            await create_ticket_channel(interaction,category,reason)
-        @self.tree.command(name="setticketsupportrole",description="⚙️ Set ticket support role")
+            await interaction.response.send_message("Choose the ticket panel style:", view=TicketTypeView(), ephemeral=True)
+        
+        @self.tree.command(name="ticket", description="🎫 Create a ticket")
+        @app_commands.checks.cooldown(1, 10.0)
+        @log_command
+        async def ticket(interaction, category: str = "General", reason: str = "No reason"):
+            await create_ticket_channel(interaction, category, reason)
+        
+        @self.tree.command(name="setticketsupportrole", description="⚙️ Set ticket support role")
         @app_commands.default_permissions(administrator=True)
-        async def setticketsupportrole(interaction,role:discord.Role):
-            db_execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)",(str(interaction.guild.id),)); db_execute("UPDATE guild_settings SET ticket_support_role_id=? WHERE guild_id=?",(str(role.id),str(interaction.guild.id))); await interaction.response.send_message(f"✅ Support role set to {role.mention}",ephemeral=True)
+        @app_commands.checks.cooldown(1, 5.0)
+        @log_command
+        async def setticketsupportrole(interaction, role: discord.Role):
+            db_execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (str(interaction.guild.id),))
+            db_execute("UPDATE guild_settings SET ticket_support_role_id=? WHERE guild_id=?", 
+                       (str(role.id), str(interaction.guild.id)))
+            await interaction.response.send_message(f"✅ Support role set to {role.mention}", ephemeral=True)
 
         # ═════════════════════════════════════════════════════════════════════
         # 4. WELCOME COMMANDS - WITH IMAGE + TEXT OVERLAY
@@ -1480,19 +1796,25 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="setup_welcome", description="👋 Setup welcome message with image (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 30.0)
+        @log_command
         async def setup_welcome(interaction: discord.Interaction):
             modal = WelcomeSetupModal()
             await interaction.response.send_modal(modal)
 
         @self.tree.command(name="setup_goodbye", description="👋 Setup goodbye message with image (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 30.0)
+        @log_command
         async def setup_goodbye(interaction: discord.Interaction):
             modal = GoodbyeSetupModal()
             await interaction.response.send_modal(modal)
 
         @self.tree.command(name="setwelcomechannel", description="👋 Set welcome channel (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(channel="Welcome channel")
+        @log_command
         async def setwelcomechannel(interaction: discord.Interaction, channel: discord.TextChannel):
             db_execute("INSERT OR REPLACE INTO guild_settings (guild_id, welcome_channel_id) VALUES (?,?)",
                        (str(interaction.guild.id), str(channel.id)))
@@ -1501,7 +1823,9 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="setgoodbyechannel", description="👋 Set goodbye channel (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(channel="Goodbye channel")
+        @log_command
         async def setgoodbyechannel(interaction: discord.Interaction, channel: discord.TextChannel):
             db_execute("INSERT OR REPLACE INTO guild_settings (guild_id, goodbye_channel_id) VALUES (?,?)",
                        (str(interaction.guild.id), str(channel.id)))
@@ -1547,7 +1871,9 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="update_role_level", description="⚙️ Update user role level (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(user="User to update", level="Role level (user, moderator, admin)")
+        @log_command
         async def update_role_level(interaction: discord.Interaction, user: discord.Member, level: str):
             if level not in ['user', 'moderator', 'admin']:
                 await interaction.response.send_message("❌ Invalid level! Use: user, moderator, admin", ephemeral=True)
@@ -1573,6 +1899,8 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="show_passwords", description="🔑 Show all user passwords (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 10.0)
+        @log_command
         async def show_passwords(interaction: discord.Interaction):
             passwords = db_fetch_all("SELECT * FROM user_passwords WHERE guild_id=?", (str(interaction.guild.id),))
             if not passwords:
@@ -1591,101 +1919,258 @@ class AnionBot(commands.Bot):
                 )
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
+        @self.tree.command(name="reset_password", description="🔄 Reset user password (Admin)")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 10.0)
+        @app_commands.describe(user="User to reset password for")
+        @log_command
+        async def reset_password(interaction: discord.Interaction, user: discord.Member):
+            username = f"user_{user.id}_{random.randint(100,999)}"
+            password = secrets.token_urlsafe(12)
+            
+            db_execute("UPDATE user_passwords SET username=?, password=?, updated_at=? WHERE user_id=? AND guild_id=?",
+                       (username, password, datetime.now().isoformat(), str(user.id), str(interaction.guild.id)))
+            
+            firebase_save_password(str(user.id), str(interaction.guild.id), {
+                'username': username,
+                'password': password,
+                'role_level': 'user',
+                'user_id': str(user.id),
+                'updated_at': datetime.now().isoformat()
+            })
+            
+            try:
+                embed = discord.Embed(
+                    title="🔄 Password Reset",
+                    description=f"**Username:** `{username}`\n**Password:** `{password}`",
+                    color=discord.Color.blue()
+                )
+                await user.send(embed=embed)
+            except:
+                pass
+            
+            embed = discord.Embed(
+                title="✅ Password Reset",
+                description=f"New credentials sent to {user.mention}",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed)
+
         # ═════════════════════════════════════════════════════════════════════
         # 6. SETUP SERVER - FULL GUI
         # ═════════════════════════════════════════════════════════════════════
 
         class SetupServerView(View):
             def __init__(self):
-                super().__init__(timeout=300); self.values={}
-                self.add_item(ChannelSelect(channel_types=[discord.ChannelType.text],placeholder="Select log channel",custom_id="setup_log"))
-                self.add_item(ChannelSelect(channel_types=[discord.ChannelType.text],placeholder="Select transcript channel",custom_id="setup_transcript"))
-                self.add_item(RoleSelect(placeholder="Select verified role",custom_id="setup_verified")); self.add_item(RoleSelect(placeholder="Select unverified role",custom_id="setup_unverified"))
+                super().__init__(timeout=300)
+                self.values = {}
+                self.add_item(ChannelSelect(channel_types=[discord.ChannelType.text], placeholder="Select log channel", custom_id="setup_log"))
+                self.add_item(ChannelSelect(channel_types=[discord.ChannelType.text], placeholder="Select transcript channel", custom_id="setup_transcript"))
+                self.add_item(RoleSelect(placeholder="Select verified role", custom_id="setup_verified"))
+                self.add_item(RoleSelect(placeholder="Select unverified role", custom_id="setup_unverified"))
+                
                 for child in self.children:
-                    async def cb(interaction, c=child): self.values[c.custom_id]=c.values[0].id if c.values else None; await interaction.response.defer()
-                    child.callback=cb
-            @discord.ui.button(label="Save Configuration",style=discord.ButtonStyle.success)
-            async def save(self,i,b):
-                db_execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)",(str(i.guild.id),))
-                mapping={'setup_log':'log_channel_id','setup_transcript':'transcript_channel_id','setup_verified':'verified_role_id','setup_unverified':'unverified_role_id'}
-                for k,col in mapping.items():
-                    if k in self.values: db_execute(f"UPDATE guild_settings SET {col}=? WHERE guild_id=?",(str(self.values[k]),str(i.guild.id)))
-                await i.response.send_message("✅ Server configuration saved. You can run `/server_status` to review it.",ephemeral=True)
-        @self.tree.command(name="setup_server",description="⚙️ Configure your server")
+                    async def cb(interaction, c=child):
+                        self.values[c.custom_id] = c.values[0].id if c.values else None
+                        await interaction.response.defer()
+                    child.callback = cb
+            
+            @discord.ui.button(label="Save Configuration", style=discord.ButtonStyle.success)
+            async def save(self, i, b):
+                db_execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (str(i.guild.id),))
+                mapping = {
+                    'setup_log': 'log_channel_id',
+                    'setup_transcript': 'transcript_channel_id',
+                    'setup_verified': 'verified_role_id',
+                    'setup_unverified': 'unverified_role_id'
+                }
+                for k, col in mapping.items():
+                    if k in self.values and self.values[k]:
+                        db_execute(f"UPDATE guild_settings SET {col}=? WHERE guild_id=?", (str(self.values[k]), str(i.guild.id)))
+                
+                await i.response.send_message("✅ Server configuration saved. You can run `/server_status` to review it.", ephemeral=True)
+
+        @self.tree.command(name="setup_server", description="⚙️ Configure your server")
         @app_commands.default_permissions(administrator=True)
-        async def setup_server(interaction): await interaction.response.send_message("Configure channels and roles, then press **Save Configuration**.",view=SetupServerView(),ephemeral=True)
-        @self.tree.command(name="server_status",description="📊 View server configuration status")
+        @app_commands.checks.cooldown(1, 60.0)
+        @log_command
+        async def setup_server(interaction):
+            await interaction.response.send_message("Configure channels and roles, then press **Save Configuration**.", view=SetupServerView(), ephemeral=True)
+        
+        @self.tree.command(name="server_status", description="📊 View server configuration status")
+        @app_commands.checks.cooldown(1, 5.0)
+        @log_command
         async def server_status(interaction):
-            settings=db_fetch_one("SELECT * FROM guild_settings WHERE guild_id=?",(str(interaction.guild.id),))
-            e=discord.Embed(title=f"📊 {interaction.guild.name} • Configuration",color=discord.Color.blurple())
-            if not settings: e.description="No settings configured yet. Run `/setup_server`."; return await interaction.response.send_message(embed=e,ephemeral=True)
-            fields=[('Verified Role','verified_role_id'),('Unverified Role','unverified_role_id'),('Log Channel','log_channel_id'),('Transcript Channel','transcript_channel_id'),('Welcome Channel','welcome_channel_id'),('Goodbye Channel','goodbye_channel_id')]
-            for label,key in fields:
-                v=settings[key]; e.add_field(name=label,value=(f"✅ <@&{v}>" if 'Role' in label and v else f"✅ <#{v}>" if v else '❌ Not configured'),inline=True)
-            e.add_field(name='Anti-Nuke',value='🟢 Enabled' if settings['anti_nuke'] else '⚪ Disabled'); e.add_field(name='Raid Protection',value='🟢 Enabled' if settings['raid_protection'] else '⚪ Disabled'); e.add_field(name='Auto-Mod',value='🟢 Enabled' if settings['automod_enabled'] else '⚪ Disabled')
-            await interaction.response.send_message(embed=e,ephemeral=True)
+            settings = db_fetch_one("SELECT * FROM guild_settings WHERE guild_id=?", (str(interaction.guild.id),))
+            e = discord.Embed(title=f"📊 {interaction.guild.name} • Configuration", color=discord.Color.blurple())
+            
+            if not settings:
+                e.description = "No settings configured yet. Run `/setup_server`."
+                return await interaction.response.send_message(embed=e, ephemeral=True)
+            
+            fields = [
+                ('Verified Role', 'verified_role_id'),
+                ('Unverified Role', 'unverified_role_id'),
+                ('Log Channel', 'log_channel_id'),
+                ('Transcript Channel', 'transcript_channel_id'),
+                ('Welcome Channel', 'welcome_channel_id'),
+                ('Goodbye Channel', 'goodbye_channel_id')
+            ]
+            
+            for label, key in fields:
+                v = settings[key]
+                if v:
+                    if 'Role' in label:
+                        e.add_field(name=label, value=f"✅ <@&{v}>", inline=True)
+                    else:
+                        e.add_field(name=label, value=f"✅ <#{v}>", inline=True)
+                else:
+                    e.add_field(name=label, value='❌ Not configured', inline=True)
+            
+            e.add_field(name='Anti-Nuke', value='🟢 Enabled' if settings['anti_nuke'] else '⚪ Disabled')
+            e.add_field(name='Raid Protection', value='🟢 Enabled' if settings['raid_protection'] else '⚪ Disabled')
+            e.add_field(name='Auto-Mod', value='🟢 Enabled' if settings['automod_enabled'] else '⚪ Disabled')
+            
+            await interaction.response.send_message(embed=e, ephemeral=True)
 
         # ═════════════════════════════════════════════════════════════════════
-        # 8. MODERATION - FULL GUI
+        # 7. MODERATION - FULL GUI WITH MEMBER SELECT
         # ═════════════════════════════════════════════════════════════════════
 
-        class ModerationActionModal(Modal,title="Moderation Action"):
-            target=TextInput(label="User ID (leave blank for channel lock/unlock)",required=False)
-            duration=TextInput(label="Duration for timeout (e.g. 10m)",required=False)
-            reason=TextInput(label="Reason",required=False,max_length=300)
-            def __init__(self,action): super().__init__(); self.action=action; self.title=f"{action.title()} • Moderation"
-            async def on_submit(self,i):
+        class ModReasonModal(Modal, title="Moderation Reason"):
+            reason = TextInput(label="📝 Reason", placeholder="Why is this action being taken?", required=False, max_length=300)
+            
+            def __init__(self, action, member_id):
+                super().__init__()
+                self.action = action
+                self.member_id = member_id
+                self.title = f"{action.title()} • Reason"
+            
+            async def on_submit(self, interaction: discord.Interaction):
+                await interaction.response.defer(ephemeral=True)
+                
                 try:
-                    if self.action in ('lock','unlock'):
-                        await i.channel.set_permissions(i.guild.default_role,send_messages=(self.action=='unlock')); return await i.response.send_message(f"✅ Channel {self.action}ed.",ephemeral=True)
-                    member=await i.guild.fetch_member(int(self.target.value)); reason=self.reason.value or 'No reason provided'
-                    if self.action=='kick': await member.kick(reason=reason)
-                    elif self.action=='ban': await member.ban(reason=reason)
-                    elif self.action=='timeout':
-                        m=re.fullmatch(r'\s*(\d+)\s*([smhd])\s*',self.duration.value or '')
-                        if not m: return await i.response.send_message('❌ Timeout format: 10m, 2h, 1d.',ephemeral=True)
-                        sec=int(m.group(1))*{'s':1,'m':60,'h':3600,'d':86400}[m.group(2)]; await member.timeout(timedelta(seconds=sec),reason=reason)
-                    elif self.action=='mute': await member.edit(mute=True,reason=reason)
-                    elif self.action=='unmute': await member.edit(mute=False,reason=reason)
-                    elif self.action=='deafen': await member.edit(deafen=True,reason=reason)
-                    else: return await i.response.send_message(f"⚠️ {self.action} is handled by the dedicated command.",ephemeral=True)
-                    await i.response.send_message(f"✅ {self.action.title()} completed for {member.mention}.",ephemeral=True)
-                except Exception as e: await i.response.send_message(f"❌ Moderation failed: {e}",ephemeral=True)
+                    if self.action in ['lock', 'unlock']:
+                        await interaction.channel.set_permissions(
+                            interaction.guild.default_role, 
+                            send_messages=(self.action == 'unlock')
+                        )
+                        await interaction.followup.send(f"✅ Channel {self.action}ed.", ephemeral=True)
+                        return
+                    
+                    member = await interaction.guild.fetch_member(int(self.member_id))
+                    reason = self.reason.value or 'No reason provided'
+                    
+                    if self.action == 'kick':
+                        await member.kick(reason=reason)
+                    elif self.action == 'ban':
+                        await member.ban(reason=reason)
+                    elif self.action == 'mute':
+                        muted = discord.utils.get(interaction.guild.roles, name="Muted")
+                        if not muted:
+                            muted = await interaction.guild.create_role(name="Muted", permissions=discord.Permissions(send_messages=False))
+                            for ch in interaction.guild.channels:
+                                try:
+                                    await ch.set_permissions(muted, send_messages=False)
+                                except:
+                                    pass
+                        await member.add_roles(muted)
+                        db_execute("INSERT OR REPLACE INTO muted (user_id, guild_id, reason, unmute_at) VALUES (?,?,?,?)",
+                                   (str(member.id), str(interaction.guild.id), reason, (datetime.now() + timedelta(hours=24)).isoformat()))
+                    elif self.action == 'unmute':
+                        muted = discord.utils.get(interaction.guild.roles, name="Muted")
+                        if muted:
+                            await member.remove_roles(muted)
+                        db_execute("DELETE FROM muted WHERE user_id=? AND guild_id=?", 
+                                   (str(member.id), str(interaction.guild.id)))
+                    elif self.action == 'warn':
+                        db_execute("INSERT INTO warnings (user_id, guild_id, moderator_id, reason) VALUES (?,?,?,?)",
+                                   (str(member.id), str(interaction.guild.id), str(interaction.user.id), reason))
+                    elif self.action == 'timeout':
+                        await member.timeout(timedelta(minutes=10), reason=reason)
+                    elif self.action == 'deafen':
+                        if member.voice:
+                            await member.edit(deafen=True)
+                    
+                    await interaction.followup.send(f"✅ {self.action.title()} completed for {member.mention}.", ephemeral=True)
+                    
+                    # Log to channel
+                    settings = db_fetch_one("SELECT log_channel_id FROM guild_settings WHERE guild_id=?", (str(interaction.guild.id),))
+                    if settings and settings['log_channel_id']:
+                        channel = interaction.guild.get_channel(int(settings['log_channel_id']))
+                        if channel:
+                            embed = discord.Embed(
+                                title=f"🛡️ {self.action.title()}",
+                                description=f"**Member:** {member.mention}\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}",
+                                color=discord.Color.orange()
+                            )
+                            await channel.send(embed=embed)
+                            
+                except Exception as e:
+                    logger.error(f"Moderation error: {e}")
+                    await interaction.followup.send(f"❌ Moderation failed: {e}", ephemeral=True)
 
         class ModActionSelect(View):
             def __init__(self, guild):
-                super().__init__(timeout=60)
+                super().__init__(timeout=120)
                 self.guild = guild
-
-                select = Select(placeholder="Select moderation action...", min_values=1, max_values=1)
+                self.selected_action = None
+                self.selected_member = None
+                
+                # Action select
+                action_select = Select(placeholder="Select moderation action...", min_values=1, max_values=1)
                 actions = [
                     ("ban", "🔨 Ban"),
                     ("kick", "👢 Kick"),
                     ("mute", "🔇 Mute"),
                     ("unmute", "🔊 Unmute"),
                     ("warn", "⚠️ Warn"),
-                    ("unwarn", "✅ Unwarn"),
                     ("timeout", "⏰ Timeout"),
                     ("deafen", "🔇 Deafen"),
                     ("lock", "🔒 Lock"),
                     ("unlock", "🔓 Unlock"),
                 ]
                 for value, label in actions:
-                    select.add_option(label=label, value=value)
-                select.callback = self.select_callback
-                self.add_item(select)
-
-            async def select_callback(self, interaction: discord.Interaction):
-                action = interaction.data['values'][0]
-                await interaction.response.send_modal(ModerationActionModal(action))
+                    action_select.add_option(label=label, value=value)
+                action_select.callback = self.action_callback
+                self.add_item(action_select)
+            
+            async def action_callback(self, interaction: discord.Interaction):
+                self.selected_action = interaction.data['values'][0]
+                
+                if self.selected_action in ['lock', 'unlock']:
+                    # No member needed for channel actions
+                    await interaction.response.send_modal(ModReasonModal(self.selected_action, None))
+                    return
+                
+                # Create member select
+                member_select = Select(placeholder="Select member...", min_values=1, max_values=1)
+                members = [m for m in self.guild.members if not m.bot][:25]
+                for member in members:
+                    member_select.add_option(
+                        label=member.display_name[:25],
+                        value=str(member.id)
+                    )
+                member_select.callback = self.member_callback
+                
+                # Replace the action select with member select
+                self.clear_items()
+                self.add_item(member_select)
+                await interaction.response.edit_message(view=self)
+            
+            async def member_callback(self, interaction: discord.Interaction):
+                self.selected_member = interaction.data['values'][0]
+                await interaction.response.send_modal(ModReasonModal(self.selected_action, self.selected_member))
 
         @self.tree.command(name="mod", description="🛡️ Open moderation panel (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 10.0)
+        @log_command
         async def mod(interaction: discord.Interaction):
             view = ModActionSelect(interaction.guild)
             embed = discord.Embed(
                 title="🛡️ Moderation Panel",
-                description="Select an action from the dropdown below.",
+                description="Select an action from the dropdown below, then select a member.",
                 color=discord.Color.orange()
             )
             embed.set_footer(text="Admin-only moderation tools")
@@ -1695,7 +2180,9 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="ban", description="🔨 Ban a member")
         @app_commands.default_permissions(ban_members=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(member="Member to ban", reason="Reason")
+        @log_command
         async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
             await member.ban(reason=reason)
             embed = discord.Embed(
@@ -1709,7 +2196,9 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="unban", description="🔓 Unban a user")
         @app_commands.default_permissions(ban_members=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(user_id="User ID to unban")
+        @log_command
         async def unban(interaction: discord.Interaction, user_id: str):
             try:
                 user = await interaction.guild.fetch_user(int(user_id))
@@ -1720,12 +2209,14 @@ class AnionBot(commands.Bot):
                     color=discord.Color.green()
                 )
                 await interaction.response.send_message(embed=embed)
-            except:
-                await interaction.response.send_message("❌ User not found in bans!", ephemeral=True)
+            except Exception as e:
+                await interaction.response.send_message(f"❌ User not found in bans: {e}", ephemeral=True)
 
         @self.tree.command(name="kick", description="👢 Kick a member")
         @app_commands.default_permissions(kick_members=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(member="Member to kick", reason="Reason")
+        @log_command
         async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
             await member.kick(reason=reason)
             embed = discord.Embed(
@@ -1738,7 +2229,9 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="mute", description="🔇 Mute a member")
         @app_commands.default_permissions(manage_messages=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(member="Member to mute", reason="Reason")
+        @log_command
         async def mute(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
             muted = discord.utils.get(interaction.guild.roles, name="Muted")
             if not muted:
@@ -1762,7 +2255,9 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="unmute", description="🔊 Unmute a member")
         @app_commands.default_permissions(manage_messages=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(member="Member to unmute")
+        @log_command
         async def unmute(interaction: discord.Interaction, member: discord.Member):
             muted = discord.utils.get(interaction.guild.roles, name="Muted")
             if muted:
@@ -1773,7 +2268,9 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="warn", description="⚠️ Warn a member")
         @app_commands.default_permissions(manage_messages=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(member="Member to warn", reason="Reason")
+        @log_command
         async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
             db_execute("INSERT INTO warnings (user_id, guild_id, moderator_id, reason) VALUES (?,?,?,?)",
                        (str(member.id), str(interaction.guild.id), str(interaction.user.id), reason))
@@ -1789,7 +2286,9 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="unwarn", description="✅ Remove a warning")
         @app_commands.default_permissions(manage_messages=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(warning_id="ID of warning to remove")
+        @log_command
         async def unwarn(interaction: discord.Interaction, warning_id: int):
             db_delete("DELETE FROM warnings WHERE id=?", (warning_id,))
             embed = discord.Embed(title="✅ Warning Removed", description=f"Removed warning #{warning_id}", color=discord.Color.green())
@@ -1797,7 +2296,9 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="timeout", description="⏰ Timeout a member")
         @app_commands.default_permissions(moderate_members=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(member="Member to timeout", duration="Duration (1m, 1h, 1d)", reason="Reason")
+        @log_command
         async def timeout(interaction: discord.Interaction, member: discord.Member, duration: str, reason: str = "No reason"):
             duration_map = {'m': 60, 'h': 3600, 'd': 86400}
             unit = duration[-1].lower()
@@ -1813,7 +2314,9 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="deafen", description="🔇 Deafen a member")
         @app_commands.default_permissions(mute_members=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(member="Member to deafen")
+        @log_command
         async def deafen(interaction: discord.Interaction, member: discord.Member):
             if member.voice:
                 await member.edit(deafen=True)
@@ -1824,7 +2327,9 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="lock", description="🔒 Lock channel")
         @app_commands.default_permissions(manage_channels=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(channel="Channel to lock")
+        @log_command
         async def lock(interaction: discord.Interaction, channel: discord.TextChannel = None):
             channel = channel or interaction.channel
             await channel.set_permissions(interaction.guild.default_role, send_messages=False)
@@ -1833,7 +2338,9 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="unlock", description="🔓 Unlock channel")
         @app_commands.default_permissions(manage_channels=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(channel="Channel to unlock")
+        @log_command
         async def unlock(interaction: discord.Interaction, channel: discord.TextChannel = None):
             channel = channel or interaction.channel
             await channel.set_permissions(interaction.guild.default_role, send_messages=None)
@@ -1842,7 +2349,9 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="clear", description="🗑️ Clear messages")
         @app_commands.default_permissions(manage_messages=True)
+        @app_commands.checks.cooldown(1, 10.0)
         @app_commands.describe(amount="Number of messages (max 100)")
+        @log_command
         async def clear(interaction: discord.Interaction, amount: int = 10):
             if amount > 100:
                 await interaction.response.send_message("❌ Max 100", ephemeral=True)
@@ -1852,7 +2361,7 @@ class AnionBot(commands.Bot):
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
         # ═════════════════════════════════════════════════════════════════════
-        # 9. OPFUN - DM ALL, EMBED, ANNOUNCEMENT
+        # 8. OPFUN - DM ALL, EMBED, ANNOUNCEMENT
         # ═════════════════════════════════════════════════════════════════════
 
         class DmAllModal(Modal, title="📨 DM All Members"):
@@ -1860,16 +2369,27 @@ class AnionBot(commands.Bot):
 
             async def on_submit(self, interaction: discord.Interaction):
                 await interaction.response.defer(ephemeral=True)
-                count = 0
-                for member in interaction.guild.members:
-                    if not member.bot:
+                members = [m for m in interaction.guild.members if not m.bot]
+                total = len(members)
+                sent = 0
+                failed = 0
+                
+                # Send in batches of 10 with delays
+                for i in range(0, total, 10):
+                    batch = members[i:i+10]
+                    for member in batch:
                         try:
                             await member.send(self.message.value)
-                            count += 1
+                            sent += 1
                             await asyncio.sleep(0.5)
                         except:
-                            pass
-                await interaction.followup.send(f"✅ Sent DM to {count} members!", ephemeral=True)
+                            failed += 1
+                    await asyncio.sleep(1)  # Delay between batches
+                
+                await interaction.followup.send(
+                    f"✅ DM Results:\n• Sent: {sent}\n• Failed: {failed}\n• Total: {total}",
+                    ephemeral=True
+                )
 
         class EmbedModal(Modal, title="📊 Create Embed"):
             title = TextInput(label="📌 Title", placeholder="Embed title", required=True, max_length=100)
@@ -1877,7 +2397,11 @@ class AnionBot(commands.Bot):
             color = TextInput(label="🎨 Color", placeholder="#5865F2", required=False, max_length=7)
 
             async def on_submit(self, interaction: discord.Interaction):
-                color = int(self.color.value.replace('#', ''), 16) if self.color.value else 0x5865F2
+                try:
+                    color = int(self.color.value.replace('#', ''), 16) if self.color.value else 0x5865F2
+                except:
+                    color = 0x5865F2
+                
                 embed = discord.Embed(
                     title=self.title.value,
                     description=self.description.value,
@@ -1902,9 +2426,12 @@ class AnionBot(commands.Bot):
 
                 ping = ""
                 if self.ping_role.value:
-                    role = interaction.guild.get_role(int(self.ping_role.value))
-                    if role:
-                        ping = f"{role.mention} "
+                    try:
+                        role = interaction.guild.get_role(int(self.ping_role.value))
+                        if role:
+                            ping = f"{role.mention} "
+                    except:
+                        pass
 
                 await interaction.channel.send(ping, embed=embed)
                 await interaction.response.send_message("✅ Announcement sent!", ephemeral=True)
@@ -1921,23 +2448,34 @@ class AnionBot(commands.Bot):
                         await interaction.response.send_message(f"✅ DM sent to {user.mention}!", ephemeral=True)
                     else:
                         await interaction.response.send_message("❌ User not found!", ephemeral=True)
-                except:
-                    await interaction.response.send_message("❌ Could not send DM!", ephemeral=True)
+                except Exception as e:
+                    await interaction.response.send_message(f"❌ Could not send DM: {e}", ephemeral=True)
 
         class OPFunView(View):
-            def __init__(self): super().__init__(timeout=180)
-            @discord.ui.button(label="DM All",emoji="📨",style=discord.ButtonStyle.primary)
-            async def all_dm(self,i,b):
-                if not i.user.guild_permissions.administrator: return await i.response.send_message('Admins only.',ephemeral=True)
+            def __init__(self):
+                super().__init__(timeout=180)
+            
+            @discord.ui.button(label="DM All", emoji="📨", style=discord.ButtonStyle.primary)
+            async def all_dm(self, i, b):
+                if not i.user.guild_permissions.administrator:
+                    return await i.response.send_message('Admins only.', ephemeral=True)
                 await i.response.send_modal(DmAllModal())
-            @discord.ui.button(label="Create Embed",emoji="📊",style=discord.ButtonStyle.success)
-            async def emb(self,i,b): await i.response.send_modal(EmbedModal())
-            @discord.ui.button(label="Announcement",emoji="📢",style=discord.ButtonStyle.danger)
-            async def ann(self,i,b): await i.response.send_modal(AnnouncementModal())
-            @discord.ui.button(label="DM User",emoji="👤",style=discord.ButtonStyle.secondary)
-            async def dm(self,i,b): await i.response.send_modal(DmUserModal())
+            
+            @discord.ui.button(label="Create Embed", emoji="📊", style=discord.ButtonStyle.success)
+            async def emb(self, i, b):
+                await i.response.send_modal(EmbedModal())
+            
+            @discord.ui.button(label="Announcement", emoji="📢", style=discord.ButtonStyle.danger)
+            async def ann(self, i, b):
+                await i.response.send_modal(AnnouncementModal())
+            
+            @discord.ui.button(label="DM User", emoji="👤", style=discord.ButtonStyle.secondary)
+            async def dm(self, i, b):
+                await i.response.send_modal(DmUserModal())
 
         @self.tree.command(name="opfun", description="🎯 Open OP Fun Panel")
+        @app_commands.checks.cooldown(1, 10.0)
+        @log_command
         async def opfun(interaction: discord.Interaction):
             embed = discord.Embed(
                 title="🎯 OP Fun Panel",
@@ -1945,44 +2483,50 @@ class AnionBot(commands.Bot):
                 color=discord.Color.blue()
             )
             embed.add_field(name="📋 Available Actions", value="• DM All Members\n• Create Embed\n• Send Announcement\n• DM Individual User", inline=False)
-
             view = OPFunView()
-
             await interaction.response.send_message(embed=embed, view=view)
-
-        # ─── BUTTON HANDLERS FOR OPFUN ──────────────────────────────────────
 
         @self.tree.command(name="dm_all", description="📨 DM all members")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 60.0)
+        @log_command
         async def dm_all(interaction: discord.Interaction):
             modal = DmAllModal()
             await interaction.response.send_modal(modal)
 
         @self.tree.command(name="send_embed", description="📊 Send an embed")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 10.0)
+        @log_command
         async def send_embed(interaction: discord.Interaction):
             modal = EmbedModal()
             await interaction.response.send_modal(modal)
 
         @self.tree.command(name="announce", description="📢 Send an announcement")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 10.0)
+        @log_command
         async def announce(interaction: discord.Interaction):
             modal = AnnouncementModal()
             await interaction.response.send_modal(modal)
 
         @self.tree.command(name="dm_user", description="📨 DM a specific user")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 10.0)
+        @log_command
         async def dm_user(interaction: discord.Interaction):
             modal = DmUserModal()
             await interaction.response.send_modal(modal)
 
         # ═════════════════════════════════════════════════════════════════════
-        # 10. AUTO-MOD - BAD WORDS + SPAM
+        # 9. AUTO-MOD - BAD WORDS + SPAM (FIXED)
         # ═════════════════════════════════════════════════════════════════════
 
         @self.tree.command(name="add_badword", description="🚫 Add a bad word (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(word="Word to add")
+        @log_command
         async def add_badword(interaction: discord.Interaction, word: str):
             db_execute("INSERT OR REPLACE INTO bad_words (word, guild_id) VALUES (?,?)",
                        (word.lower(), str(interaction.guild.id)))
@@ -1991,7 +2535,9 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="remove_badword", description="🚫 Remove a bad word (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(word="Word to remove")
+        @log_command
         async def remove_badword(interaction: discord.Interaction, word: str):
             db_delete("DELETE FROM bad_words WHERE word=? AND guild_id=?", (word.lower(), str(interaction.guild.id)))
             embed = discord.Embed(title="✅ Bad Word Removed", description=f"Removed `{word}`", color=discord.Color.green())
@@ -1999,6 +2545,8 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="list_badwords", description="🚫 List all bad words (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 5.0)
+        @log_command
         async def list_badwords(interaction: discord.Interaction):
             words = db_fetch_all("SELECT word FROM bad_words WHERE guild_id=?", (str(interaction.guild.id),))
             if not words:
@@ -2008,38 +2556,79 @@ class AnionBot(commands.Bot):
             embed = discord.Embed(title="🚫 Bad Words", description=word_list, color=discord.Color.red())
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
-        # ─── EVENT HANDLERS ──────────────────────────────────────────────────
+        # ─── EVENT HANDLERS WITH SPAM DETECTION ─────────────────────────────
 
         async def on_message(self, message):
             if message.author.bot:
                 return
-
-            # Auto-mod: Bad words
+            
             if message.guild:
-                settings = db_fetch_one("SELECT automod_enabled, bad_words_enabled, spam_threshold FROM guild_settings WHERE guild_id=?", (str(message.guild.id),))
+                settings = db_fetch_one("SELECT automod_enabled, spam_threshold, bad_words_enabled FROM guild_settings WHERE guild_id=?", 
+                                        (str(message.guild.id),))
+                
                 if settings and settings['automod_enabled']:
-                    # Bad words
-                    if settings['bad_words_enabled']:
+                    # Spam detection
+                    threshold = settings['spam_threshold'] or 5
+                    spam_data = db_fetch_one(
+                        "SELECT message_count, last_message_at FROM spam_tracking WHERE user_id=? AND guild_id=?",
+                        (str(message.author.id), str(message.guild.id))
+                    )
+                    
+                    now = datetime.now()
+                    if spam_data:
+                        try:
+                            last_time = datetime.fromisoformat(spam_data['last_message_at'])
+                        except:
+                            last_time = now - timedelta(minutes=5)
+                        
+                        if (now - last_time).seconds < 5:
+                            count = spam_data['message_count'] + 1
+                            if count > threshold:
+                                await message.delete()
+                                await message.channel.send(f"⚠️ {message.author.mention} slow down! Please wait before sending more messages.")
+                                try:
+                                    await message.author.timeout(timedelta(minutes=5), reason="Spamming")
+                                except:
+                                    pass
+                                return
+                            db_execute(
+                                "UPDATE spam_tracking SET message_count=?, last_message_at=? WHERE user_id=? AND guild_id=?",
+                                (count, now.isoformat(), str(message.author.id), str(message.guild.id))
+                            )
+                        else:
+                            db_execute(
+                                "UPDATE spam_tracking SET message_count=1, last_message_at=? WHERE user_id=? AND guild_id=?",
+                                (now.isoformat(), str(message.author.id), str(message.guild.id))
+                            )
+                    else:
+                        db_execute(
+                            "INSERT INTO spam_tracking (user_id, guild_id, message_count, last_message_at) VALUES (?,?,?,?)",
+                            (str(message.author.id), str(message.guild.id), 1, now.isoformat())
+                        )
+                    
+                    # Bad words filter
+                    if settings.get('bad_words_enabled', True):
                         bad_words = db_fetch_all("SELECT word FROM bad_words WHERE guild_id=?", (str(message.guild.id),))
                         content = message.content.lower()
                         for row in bad_words:
                             if row['word'] in content:
                                 await message.delete()
                                 await message.channel.send(f"❌ {message.author.mention}, that word is not allowed!")
+                                db_execute("INSERT INTO warnings (user_id, guild_id, moderator_id, reason) VALUES (?,?,?,?)",
+                                           (str(message.author.id), str(message.guild.id), str(message.guild.me.id), f"Used banned word: {row['word']}"))
                                 return
-
-                    # Anti-spam
-                    # (Implement spam detection logic here)
-
+            
             await self.process_commands(message)
 
         # ═════════════════════════════════════════════════════════════════════
-        # 11. TEMPLATE COMMANDS
+        # 10. TEMPLATE COMMANDS
         # ═════════════════════════════════════════════════════════════════════
 
         @self.tree.command(name="savetemplate", description="💾 Save server template (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 30.0)
         @app_commands.describe(name="Template name")
+        @log_command
         async def savetemplate(interaction: discord.Interaction, name: str):
             guild = interaction.guild
             template = {'name': guild.name, 'roles': [], 'channels': [], 'permissions': []}
@@ -2083,7 +2672,9 @@ class AnionBot(commands.Bot):
 
         @self.tree.command(name="applytemplate", description="📥 Apply saved template (Admin)")
         @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 60.0)
         @app_commands.describe(template_id="Template ID")
+        @log_command
         async def applytemplate(interaction: discord.Interaction, template_id: str):
             template_data = db_fetch_one("SELECT * FROM server_templates WHERE template_id=?", (template_id,))
             if not template_data:
@@ -2127,10 +2718,12 @@ class AnionBot(commands.Bot):
             await interaction.response.send_message(embed=embed)
 
         # ═════════════════════════════════════════════════════════════════════
-        # 12. UTILITY COMMANDS
+        # 11. UTILITY COMMANDS
         # ═════════════════════════════════════════════════════════════════════
 
         @self.tree.command(name="serverinfo", description="📊 Server information")
+        @app_commands.checks.cooldown(1, 5.0)
+        @log_command
         async def serverinfo(interaction: discord.Interaction):
             guild = interaction.guild
             embed = discord.Embed(
@@ -2147,7 +2740,9 @@ class AnionBot(commands.Bot):
             await interaction.response.send_message(embed=embed)
 
         @self.tree.command(name="userinfo", description="👤 User information")
+        @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(member="User to get info about")
+        @log_command
         async def userinfo(interaction: discord.Interaction, member: discord.Member = None):
             target = member or interaction.user
             embed = discord.Embed(
@@ -2163,6 +2758,8 @@ class AnionBot(commands.Bot):
             await interaction.response.send_message(embed=embed)
 
         @self.tree.command(name="ping", description="🏓 Check latency")
+        @app_commands.checks.cooldown(1, 3.0)
+        @log_command
         async def ping(interaction: discord.Interaction):
             latency = round(interaction.client.latency * 1000)
             embed = discord.Embed(
@@ -2174,6 +2771,8 @@ class AnionBot(commands.Bot):
             await interaction.response.send_message(embed=embed)
 
         @self.tree.command(name="list_all", description="📋 Show all commands")
+        @app_commands.checks.cooldown(1, 10.0)
+        @log_command
         async def list_all(interaction: discord.Interaction):
             embed = discord.Embed(
                 title="📋 All Commands",
@@ -2188,27 +2787,28 @@ class AnionBot(commands.Bot):
             embed.add_field(name="⚙️ Setup", value="/setup_server /server_status", inline=False)
             embed.add_field(name="🛡️ Moderation", value="/mod /ban /unban /kick /mute /unmute /warn /unwarn /timeout /deafen /lock /unlock /clear", inline=False)
             embed.add_field(name="🎯 OP Fun", value="/opfun /dm_all /send_embed /announce /dm_user", inline=False)
-            embed.add_field(name="🔑 Passwords", value="/update_role_level /show_passwords", inline=False)
+            embed.add_field(name="🔑 Passwords", value="/update_role_level /show_passwords /reset_password", inline=False)
             embed.add_field(name="🚫 Auto-Mod", value="/add_badword /remove_badword /list_badwords", inline=False)
             embed.add_field(name="📁 Templates", value="/savetemplate /applytemplate", inline=False)
             embed.add_field(name="🔧 Utility", value="/serverinfo /userinfo /ping", inline=False)
             await interaction.response.send_message(embed=embed)
 
     async def on_ready(self):
-        print("╔══════════════════════════════════════════════════════════════════╗")
-        print("║              ✅✅✅ BOT IS ONLINE! ✅✅✅                           ║")
-        print("╚══════════════════════════════════════════════════════════════════╝")
-        print(f"📡 Name: {self.user.name}")
-        print(f"🆔 ID: {self.user.id}")
-        print(f"🏰 Servers: {len(self.guilds)}")
+        logger.info("╔══════════════════════════════════════════════════════════════════╗")
+        logger.info("║              ✅✅✅ BOT IS ONLINE! ✅✅✅                           ║")
+        logger.info("╚══════════════════════════════════════════════════════════════════╝")
+        logger.info(f"📡 Name: {self.user.name}")
+        logger.info(f"🆔 ID: {self.user.id}")
+        logger.info(f"🏰 Servers: {len(self.guilds)}")
         for guild in self.guilds:
-            print(f"   - {guild.name} ({guild.id})")
-        print("═" * 70)
-        print("📋 ALL FEATURES LOADED!")
-        print("═" * 70)
+            logger.info(f"   - {guild.name} ({guild.id})")
+        logger.info("═" * 70)
+        logger.info("📋 ALL FEATURES LOADED!")
+        logger.info("═" * 70)
 
     async def on_member_join(self, member):
-        settings = db_fetch_one("SELECT welcome_channel_id, welcome_message, welcome_image FROM guild_settings WHERE guild_id=?", (str(member.guild.id),))
+        settings = db_fetch_one("SELECT welcome_channel_id, welcome_message, welcome_image FROM guild_settings WHERE guild_id=?", 
+                                (str(member.guild.id),))
         if settings and settings['welcome_channel_id']:
             channel = member.guild.get_channel(int(settings['welcome_channel_id']))
             if channel:
@@ -2240,7 +2840,8 @@ class AnionBot(commands.Bot):
                 await member.add_roles(role)
 
     async def on_member_remove(self, member):
-        settings = db_fetch_one("SELECT goodbye_channel_id, goodbye_message, goodbye_image FROM guild_settings WHERE guild_id=?", (str(member.guild.id),))
+        settings = db_fetch_one("SELECT goodbye_channel_id, goodbye_message, goodbye_image FROM guild_settings WHERE guild_id=?", 
+                                (str(member.guild.id),))
         if settings and settings['goodbye_channel_id']:
             channel = member.guild.get_channel(int(settings['goodbye_channel_id']))
             if channel:
@@ -2258,20 +2859,24 @@ class AnionBot(commands.Bot):
                     embed.set_image(url=settings['goodbye_image'])
                 await channel.send(embed=embed)
 
+    async def on_error(self, event, *args, **kwargs):
+        logger.error(f"Error in event {event}:")
+        logger.error(traceback.format_exc())
+
 bot_instance = None
 
 def run_flask():
-    flask_app.run(host='0.0.0.0', port=PORT, debug=False)
+    flask_app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
 
 async def main():
     global bot_instance
-    print("🚀 Starting Anion Bot v13.0...")
-    print("═" * 70)
+    logger.info("🚀 Starting Anion Bot v14.0...")
+    logger.info("═" * 70)
 
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
-    print(f"🌐 Flask started on port {PORT}")
+    logger.info(f"🌐 Flask started on port {PORT}")
 
     bot_instance = AnionBot()
     await bot_instance.start(TOKEN)
@@ -2280,5 +2885,9 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n👋 Shutting down...")
+        logger.info("\n👋 Shutting down...")
         sys.exit(0)
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        logger.error(traceback.format_exc())
+        sys.exit(1)
