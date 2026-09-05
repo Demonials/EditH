@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ═══════════════════════════════════════════════════════════════════════════════
-                    🔐 ANION BOT v14.0 - COMPLETE FIXED SYSTEM
+                    🔐 ANION BOT v14.1 - TYPE ANNOTATION FIXED
                     ALL COMMANDS WORKING + ADVANCED LOGGING
 ═══════════════════════════════════════════════════════════════════════════════
 """
@@ -22,6 +22,7 @@ import hashlib
 import base64
 import traceback
 import time
+from typing import Optional, Dict, List, Any, Union
 from datetime import datetime, timedelta
 from flask import Flask, request, redirect, render_template_string, jsonify, session, url_for, send_file
 from flask_cors import CORS
@@ -357,7 +358,7 @@ logger.info("✅ Database tables created/verified")
 
 # ─── DATABASE HELPER FUNCTIONS ──────────────────────────────────────────────
 
-def db_execute(query, params=()):
+def db_execute(query: str, params: tuple = ()) -> Any:
     try:
         c.execute(query, params)
         conn.commit()
@@ -366,7 +367,7 @@ def db_execute(query, params=()):
         logger.error(f"Database error: {e}\nQuery: {query}\nParams: {params}")
         raise
 
-def db_fetch_one(query, params=()):
+def db_fetch_one(query: str, params: tuple = ()) -> Optional[sqlite3.Row]:
     try:
         c.execute(query, params)
         return c.fetchone()
@@ -374,7 +375,7 @@ def db_fetch_one(query, params=()):
         logger.error(f"Database error: {e}\nQuery: {query}\nParams: {params}")
         return None
 
-def db_fetch_all(query, params=()):
+def db_fetch_all(query: str, params: tuple = ()) -> List[sqlite3.Row]:
     try:
         c.execute(query, params)
         return c.fetchall()
@@ -382,7 +383,7 @@ def db_fetch_all(query, params=()):
         logger.error(f"Database error: {e}\nQuery: {query}\nParams: {params}")
         return []
 
-def db_delete(query, params=()):
+def db_delete(query: str, params: tuple = ()) -> Any:
     try:
         c.execute(query, params)
         conn.commit()
@@ -391,7 +392,7 @@ def db_delete(query, params=()):
         logger.error(f"Database error: {e}\nQuery: {query}\nParams: {params}")
         raise
 
-def db_count(table, where=None):
+def db_count(table: str, where: Optional[Dict] = None) -> int:
     try:
         query = f"SELECT COUNT(*) FROM {table}"
         if where:
@@ -406,7 +407,7 @@ def db_count(table, where=None):
 
 # ─── FIREBASE FUNCTIONS ──────────────────────────────────────────────────────
 
-def firebase_save_user(user_id, guild_id, data):
+def firebase_save_user(user_id: str, guild_id: str, data: Dict) -> bool:
     if not FIREBASE_ENABLED:
         return False
     try:
@@ -417,7 +418,7 @@ def firebase_save_user(user_id, guild_id, data):
         logger.error(f"Firebase error: {e}")
         return False
 
-def firebase_get_user(user_id, guild_id=None):
+def firebase_get_user(user_id: str, guild_id: Optional[str] = None) -> Optional[Dict]:
     if not FIREBASE_ENABLED:
         return None
     try:
@@ -430,7 +431,7 @@ def firebase_get_user(user_id, guild_id=None):
         logger.error(f"Firebase error: {e}")
         return None
 
-def firebase_save_password(user_id, guild_id, data):
+def firebase_save_password(user_id: str, guild_id: str, data: Dict) -> bool:
     if not FIREBASE_ENABLED:
         return False
     try:
@@ -441,7 +442,7 @@ def firebase_save_password(user_id, guild_id, data):
         logger.error(f"Firebase error: {e}")
         return False
 
-def firebase_get_passwords(guild_id):
+def firebase_get_passwords(guild_id: str) -> Dict:
     if not FIREBASE_ENABLED:
         return {}
     try:
@@ -451,7 +452,7 @@ def firebase_get_passwords(guild_id):
         logger.error(f"Firebase error: {e}")
         return {}
 
-def firebase_save_special_note(user_id, guild_id, note):
+def firebase_save_special_note(user_id: str, guild_id: str, note: str) -> bool:
     if not FIREBASE_ENABLED:
         return False
     try:
@@ -462,7 +463,7 @@ def firebase_save_special_note(user_id, guild_id, note):
         logger.error(f"Firebase error: {e}")
         return False
 
-def firebase_get_special_notes(guild_id):
+def firebase_get_special_notes(guild_id: str) -> Dict:
     if not FIREBASE_ENABLED:
         return {}
     try:
@@ -472,7 +473,7 @@ def firebase_get_special_notes(guild_id):
         logger.error(f"Firebase error: {e}")
         return {}
 
-def firebase_log(action, data):
+def firebase_log(action: str, data: Dict) -> bool:
     if not FIREBASE_ENABLED:
         return False
     try:
@@ -483,10 +484,10 @@ def firebase_log(action, data):
         logger.error(f"Firebase error: {e}")
         return False
 
-# ─── COMMAND LOGGING DECORATOR ──────────────────────────────────────────────
+# ─── COMMAND LOGGING DECORATOR (FIXED) ─────────────────────────────────────
 
 def log_command(func):
-    """Decorator to log command execution"""
+    """Decorator to log command execution - FIXED with proper type hints"""
     async def wrapper(interaction: discord.Interaction, *args, **kwargs):
         command_name = func.__name__
         start_time = time.time()
@@ -768,7 +769,7 @@ def callback():
     verified_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     )
 
-async def assign_verified_role(user_id, guild_id):
+async def assign_verified_role(user_id: str, guild_id: str):
     if not bot_instance:
         return
     guild = bot_instance.get_guild(int(guild_id))
@@ -2870,7 +2871,7 @@ def run_flask():
 
 async def main():
     global bot_instance
-    logger.info("🚀 Starting Anion Bot v14.0...")
+    logger.info("🚀 Starting Anion Bot v14.1...")
     logger.info("═" * 70)
 
     flask_thread = threading.Thread(target=run_flask)
