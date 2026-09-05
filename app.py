@@ -2354,6 +2354,7 @@ class AnionBot(commands.Bot):
             await interaction.response.send_message(embed=embed)
 
     async def on_ready(self):
+        # Preservation-first build: all original command registrations remain intact.
         print("╔══════════════════════════════════════════════════════════════════╗")
         print("║              ✅✅✅ BOT IS ONLINE! ✅✅✅                           ║")
         print("╚══════════════════════════════════════════════════════════════════╝")
@@ -2372,7 +2373,7 @@ class AnionBot(commands.Bot):
             channel = member.guild.get_channel(int(settings['welcome_channel_id']))
             if channel:
                 msg = settings['welcome_message'] or "👋 Welcome {mention} to **{server}**!"
-                msg = msg.replace("{mention}", member.mention).replace("{server}", member.guild.name)
+                msg = msg.replace("{mention}", member.mention).replace("{user}", member.display_name).replace("{server}", member.guild.name)
 
                 embed = discord.Embed(
                     title="👋 Welcome to the Server!",
