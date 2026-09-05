@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 ═══════════════════════════════════════════════════════════════════════════════
-                    🔐 ANION BOT v14.1 - TYPE ANNOTATION FIXED
-                    ALL COMMANDS WORKING + ADVANCED LOGGING
+                    🔐 ANION BOT v15.0 - ULTIMATE EDITION
+                    THE MOST ADVANCED DISCORD BOT EVER
+                    ALL FEATURES + GUI + FIREBASE + DASHBOARD
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -22,26 +23,31 @@ import hashlib
 import base64
 import traceback
 import time
-from typing import Optional, Dict, List, Any, Union
+import math
+from typing import Optional, Dict, List, Any, Union, Callable
 from datetime import datetime, timedelta
-from flask import Flask, request, redirect, render_template_string, jsonify, session, url_for, send_file
+from flask import Flask, request, redirect, render_template_string, jsonify, session, url_for, send_file, send_from_directory
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit
 from dotenv import load_dotenv
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
+import aiohttp
+import aiofiles
 
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from discord.ui import View, Button, Modal, TextInput, Select, ChannelSelect, RoleSelect
+from discord.ui import View, Button, Modal, TextInput, Select, ChannelSelect, RoleSelect, UserSelect
 
 # ─── FIREBASE ──────────────────────────────────────────────────────────────────
 
 import firebase_admin
-from firebase_admin import credentials, db as firebase_db
+from firebase_admin import credentials, db as firebase_db, firestore, storage
 
 load_dotenv()
 
 # ═════════════════════════════════════════════════════════════════════════════
-# ADVANCED LOGGING SYSTEM
+# ADVANCED LOGGING SYSTEM WITH COLOR
 # ═════════════════════════════════════════════════════════════════════════════
 
 class ColoredFormatter(logging.Formatter):
@@ -57,6 +63,8 @@ class ColoredFormatter(logging.Formatter):
         'BOLD': '\033[1m',       # Bold
         'BLUE': '\033[34m',      # Blue
         'PURPLE': '\033[35m',    # Purple
+        'GOLD': '\033[33m',      # Gold
+        'CYAN': '\033[36m',      # Cyan
     }
     
     def __init__(self):
@@ -151,12 +159,14 @@ DB_FILE = os.path.join(DB_PATH, 'bot.db')
 # ─── FIREBASE INIT ──────────────────────────────────────────────────────────
 
 FIREBASE_ENABLED = False
+firestore_db = None
 
 if FIREBASE_JSON:
     try:
         cred_dict = json.loads(FIREBASE_JSON)
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred, {'databaseURL': FIREBASE_URL})
+        firestore_db = firestore.client()
         logger.info("✅ Firebase Connected!")
         FIREBASE_ENABLED = True
     except Exception as e:
@@ -178,13 +188,14 @@ elif FIREBASE_URL and FIREBASE_KEY and FIREBASE_EMAIL:
         }
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred, {'databaseURL': FIREBASE_URL})
+        firestore_db = firestore.client()
         logger.info("✅ Firebase Connected!")
         FIREBASE_ENABLED = True
     except Exception as e:
         logger.error(f"❌ Firebase error: {e}")
 
 # ═════════════════════════════════════════════════════════════════════════════
-# DATABASE
+# DATABASE - ULTIMATE SCHEMA
 # ═════════════════════════════════════════════════════════════════════════════
 
 conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -193,6 +204,7 @@ c = conn.cursor()
 
 # ─── ALL TABLES ──────────────────────────────────────────────────────────────
 
+# Guild Settings
 c.execute("""
     CREATE TABLE IF NOT EXISTS guild_settings (
         guild_id TEXT PRIMARY KEY,
@@ -215,10 +227,20 @@ c.execute("""
         automod_enabled BOOLEAN DEFAULT 1,
         spam_threshold INTEGER DEFAULT 5,
         bad_words_enabled BOOLEAN DEFAULT 1,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        leveling_enabled BOOLEAN DEFAULT 1,
+        xp_multiplier REAL DEFAULT 1.0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        prefix TEXT DEFAULT '/',
+        language TEXT DEFAULT 'en',
+        timezone TEXT DEFAULT 'UTC',
+        mod_log_enabled BOOLEAN DEFAULT 1,
+        member_log_enabled BOOLEAN DEFAULT 1,
+        message_log_enabled BOOLEAN DEFAULT 1,
+        voice_log_enabled BOOLEAN DEFAULT 1
     )
 """)
 
+# Verification
 c.execute("""
     CREATE TABLE IF NOT EXISTS verified_users (
         user_id TEXT, guild_id TEXT,
@@ -230,6 +252,7 @@ c.execute("""
     )
 """)
 
+# OAuth Tokens
 c.execute("""
     CREATE TABLE IF NOT EXISTS oauth_tokens (
         user_id TEXT, guild_id TEXT,
@@ -239,6 +262,7 @@ c.execute("""
     )
 """)
 
+# Tickets - Enhanced
 c.execute("""
     CREATE TABLE IF NOT EXISTS tickets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -248,19 +272,29 @@ c.execute("""
         category TEXT, reason TEXT,
         claimed_by TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         closed_at TIMESTAMP, special_note TEXT,
-        ticket_type TEXT DEFAULT 'single'
+        ticket_type TEXT DEFAULT 'single',
+        priority TEXT DEFAULT 'medium',
+        rating INTEGER DEFAULT 0,
+        feedback TEXT
     )
 """)
 
+# Ticket Settings
 c.execute("""
     CREATE TABLE IF NOT EXISTS ticket_settings (
         guild_id TEXT PRIMARY KEY,
         ticket_type TEXT DEFAULT 'single',
         button_config TEXT,
-        dropdown_config TEXT
+        dropdown_config TEXT,
+        category_id TEXT,
+        support_role_id TEXT,
+        admin_role_id TEXT,
+        log_channel_id TEXT,
+        transcript_channel_id TEXT
     )
 """)
 
+# Giveaways - Enhanced
 c.execute("""
     CREATE TABLE IF NOT EXISTS giveaways (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -272,7 +306,10 @@ c.execute("""
         ended_at TIMESTAMP,
         hosted_by TEXT, ping_role_id TEXT,
         image_url TEXT, description TEXT,
-        participant_count INTEGER DEFAULT 0
+        participant_count INTEGER DEFAULT 0,
+        requirements TEXT,
+        bonus_entries INTEGER DEFAULT 0,
+        is_featured BOOLEAN DEFAULT 0
     )
 """)
 
@@ -280,17 +317,44 @@ c.execute("""
     CREATE TABLE IF NOT EXISTS giveaway_participants (
         giveaway_id INTEGER, user_id TEXT,
         joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        bonus_entries INTEGER DEFAULT 0,
         PRIMARY KEY (giveaway_id, user_id)
     )
 """)
 
+# Leveling System
+c.execute("""
+    CREATE TABLE IF NOT EXISTS levels (
+        user_id TEXT, guild_id TEXT,
+        xp INTEGER DEFAULT 0,
+        level INTEGER DEFAULT 0,
+        messages INTEGER DEFAULT 0,
+        voice_minutes INTEGER DEFAULT 0,
+        last_message TIMESTAMP,
+        last_voice TIMESTAMP,
+        PRIMARY KEY (user_id, guild_id)
+    )
+""")
+
+c.execute("""
+    CREATE TABLE IF NOT EXISTS level_roles (
+        guild_id TEXT,
+        level INTEGER,
+        role_id TEXT,
+        PRIMARY KEY (guild_id, level)
+    )
+""")
+
+# Moderation - Enhanced
 c.execute("""
     CREATE TABLE IF NOT EXISTS warnings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT, guild_id TEXT,
         moderator_id TEXT, reason TEXT,
         warned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        expires_at TIMESTAMP, active BOOLEAN DEFAULT 1
+        expires_at TIMESTAMP, active BOOLEAN DEFAULT 1,
+        severity INTEGER DEFAULT 1,
+        evidence TEXT
     )
 """)
 
@@ -305,14 +369,24 @@ c.execute("""
 """)
 
 c.execute("""
-    CREATE TABLE IF NOT EXISTS server_templates (
-        template_id TEXT PRIMARY KEY,
-        guild_id TEXT, name TEXT,
-        template_json TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    CREATE TABLE IF NOT EXISTS bans (
+        user_id TEXT, guild_id TEXT,
+        banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        reason TEXT, moderator_id TEXT,
+        PRIMARY KEY (user_id, guild_id)
     )
 """)
 
+c.execute("""
+    CREATE TABLE IF NOT EXISTS mod_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id TEXT, user_id TEXT,
+        moderator_id TEXT, action TEXT,
+        reason TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+""")
+
+# User Passwords - Enhanced
 c.execute("""
     CREATE TABLE IF NOT EXISTS user_passwords (
         user_id TEXT, guild_id TEXT,
@@ -320,18 +394,23 @@ c.execute("""
         role_level TEXT DEFAULT 'user',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_login TIMESTAMP,
+        login_count INTEGER DEFAULT 0,
         PRIMARY KEY (user_id, guild_id)
     )
 """)
 
+# Bad Words - Enhanced
 c.execute("""
     CREATE TABLE IF NOT EXISTS bad_words (
         word TEXT, guild_id TEXT,
         severity INTEGER DEFAULT 1,
+        action TEXT DEFAULT 'warn',
         PRIMARY KEY (word, guild_id)
     )
 """)
 
+# Spam Tracking
 c.execute("""
     CREATE TABLE IF NOT EXISTS spam_tracking (
         user_id TEXT, guild_id TEXT,
@@ -341,6 +420,7 @@ c.execute("""
     )
 """)
 
+# Command Logs
 c.execute("""
     CREATE TABLE IF NOT EXISTS command_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -349,12 +429,161 @@ c.execute("""
         channel_id TEXT,
         success BOOLEAN,
         error TEXT,
+        execution_time REAL,
         executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
 """)
 
+# Server Templates - Enhanced
+c.execute("""
+    CREATE TABLE IF NOT EXISTS server_templates (
+        template_id TEXT PRIMARY KEY,
+        guild_id TEXT, name TEXT,
+        template_json TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        author_id TEXT,
+        version INTEGER DEFAULT 1,
+        description TEXT,
+        category TEXT
+    )
+""")
+
+# Economy System
+c.execute("""
+    CREATE TABLE IF NOT EXISTS economy (
+        user_id TEXT, guild_id TEXT,
+        coins INTEGER DEFAULT 0,
+        bank INTEGER DEFAULT 0,
+        total_earned INTEGER DEFAULT 0,
+        total_spent INTEGER DEFAULT 0,
+        daily_streak INTEGER DEFAULT 0,
+        last_daily TIMESTAMP,
+        PRIMARY KEY (user_id, guild_id)
+    )
+""")
+
+c.execute("""
+    CREATE TABLE IF NOT EXISTS shop_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id TEXT,
+        name TEXT, description TEXT,
+        price INTEGER, role_id TEXT,
+        stock INTEGER DEFAULT -1,
+        is_limited BOOLEAN DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+""")
+
+c.execute("""
+    CREATE TABLE IF NOT EXISTS inventory (
+        user_id TEXT, guild_id TEXT,
+        item_id INTEGER,
+        quantity INTEGER DEFAULT 1,
+        purchased_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, guild_id, item_id)
+    )
+""")
+
+# Voice System
+c.execute("""
+    CREATE TABLE IF NOT EXISTS voice_rooms (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id TEXT,
+        channel_id TEXT, owner_id TEXT,
+        name TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        is_locked BOOLEAN DEFAULT 0,
+        is_hidden BOOLEAN DEFAULT 0,
+        user_limit INTEGER DEFAULT 0,
+        bitrate INTEGER DEFAULT 64000
+    )
+""")
+
+# Reaction Roles
+c.execute("""
+    CREATE TABLE IF NOT EXISTS reaction_roles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id TEXT,
+        message_id TEXT, channel_id TEXT,
+        emoji TEXT, role_id TEXT,
+        description TEXT,
+        is_exclusive BOOLEAN DEFAULT 0
+    )
+""")
+
+# Polls
+c.execute("""
+    CREATE TABLE IF NOT EXISTS polls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT, guild_id TEXT,
+        channel_id TEXT, question TEXT,
+        options TEXT, created_by TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        ends_at TIMESTAMP,
+        is_anonymous BOOLEAN DEFAULT 0,
+        allow_multiple BOOLEAN DEFAULT 0
+    )
+""")
+
+c.execute("""
+    CREATE TABLE IF NOT EXISTS poll_votes (
+        poll_id INTEGER, user_id TEXT,
+        option_index INTEGER,
+        voted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (poll_id, user_id)
+    )
+""")
+
+# Suggest System
+c.execute("""
+    CREATE TABLE IF NOT EXISTS suggestions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT, guild_id TEXT,
+        channel_id TEXT, user_id TEXT,
+        suggestion TEXT, status TEXT DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        approved_at TIMESTAMP, rejected_at TIMESTAMP,
+        approved_by TEXT, rejected_by TEXT,
+        reason TEXT
+    )
+""")
+
+# Auto Roles
+c.execute("""
+    CREATE TABLE IF NOT EXISTS auto_roles (
+        guild_id TEXT,
+        role_id TEXT,
+        PRIMARY KEY (guild_id, role_id)
+    )
+""")
+
+# Starboard
+c.execute("""
+    CREATE TABLE IF NOT EXISTS starboard (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id TEXT,
+        message_id TEXT, channel_id TEXT,
+        author_id TEXT, content TEXT,
+        star_count INTEGER DEFAULT 1,
+        starboard_message_id TEXT,
+        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+""")
+
+# Welcomer Images
+c.execute("""
+    CREATE TABLE IF NOT EXISTS welcomer_images (
+        guild_id TEXT PRIMARY KEY,
+        background_url TEXT,
+        overlay_color TEXT DEFAULT '#5865F2',
+        font_color TEXT DEFAULT '#FFFFFF',
+        text_position TEXT DEFAULT 'center'
+    )
+""")
+
+# ─── CREATE TABLES ──────────────────────────────────────────────────────────
+
 conn.commit()
-logger.info("✅ Database tables created/verified")
+logger.info("✅ All database tables created/verified")
 
 # ─── DATABASE HELPER FUNCTIONS ──────────────────────────────────────────────
 
@@ -408,86 +637,83 @@ def db_count(table: str, where: Optional[Dict] = None) -> int:
 # ─── FIREBASE FUNCTIONS ──────────────────────────────────────────────────────
 
 def firebase_save_user(user_id: str, guild_id: str, data: Dict) -> bool:
-    if not FIREBASE_ENABLED:
+    if not FIREBASE_ENABLED or not firestore_db:
         return False
     try:
-        ref = firebase_db.reference(f'/users/{user_id}/guilds/{guild_id}')
-        ref.set(data)
+        firestore_db.collection('users').document(str(user_id)).collection('guilds').document(str(guild_id)).set(data, merge=True)
         return True
     except Exception as e:
         logger.error(f"Firebase error: {e}")
         return False
 
 def firebase_get_user(user_id: str, guild_id: Optional[str] = None) -> Optional[Dict]:
-    if not FIREBASE_ENABLED:
+    if not FIREBASE_ENABLED or not firestore_db:
         return None
     try:
         if guild_id:
-            ref = firebase_db.reference(f'/users/{user_id}/guilds/{guild_id}')
+            doc = firestore_db.collection('users').document(str(user_id)).collection('guilds').document(str(guild_id)).get()
+            return doc.to_dict() if doc.exists else None
         else:
-            ref = firebase_db.reference(f'/users/{user_id}')
-        return ref.get()
+            docs = firestore_db.collection('users').document(str(user_id)).collections()
+            data = {}
+            for collection in docs:
+                for doc in collection.stream():
+                    data[doc.id] = doc.to_dict()
+            return data if data else None
     except Exception as e:
         logger.error(f"Firebase error: {e}")
         return None
 
 def firebase_save_password(user_id: str, guild_id: str, data: Dict) -> bool:
-    if not FIREBASE_ENABLED:
+    if not FIREBASE_ENABLED or not firestore_db:
         return False
     try:
-        ref = firebase_db.reference(f'/passwords/{guild_id}/{user_id}')
-        ref.set(data)
+        firestore_db.collection('passwords').document(str(guild_id)).collection('users').document(str(user_id)).set(data, merge=True)
         return True
     except Exception as e:
         logger.error(f"Firebase error: {e}")
         return False
 
 def firebase_get_passwords(guild_id: str) -> Dict:
-    if not FIREBASE_ENABLED:
+    if not FIREBASE_ENABLED or not firestore_db:
         return {}
     try:
-        ref = firebase_db.reference(f'/passwords/{guild_id}')
-        return ref.get() or {}
-    except Exception as e:
-        logger.error(f"Firebase error: {e}")
-        return {}
-
-def firebase_save_special_note(user_id: str, guild_id: str, note: str) -> bool:
-    if not FIREBASE_ENABLED:
-        return False
-    try:
-        ref = firebase_db.reference(f'/special_notes/{guild_id}/{user_id}')
-        ref.set({'note': note, 'updated_at': datetime.now().isoformat()})
-        return True
-    except Exception as e:
-        logger.error(f"Firebase error: {e}")
-        return False
-
-def firebase_get_special_notes(guild_id: str) -> Dict:
-    if not FIREBASE_ENABLED:
-        return {}
-    try:
-        ref = firebase_db.reference(f'/special_notes/{guild_id}')
-        return ref.get() or {}
+        docs = firestore_db.collection('passwords').document(str(guild_id)).collection('users').stream()
+        return {doc.id: doc.to_dict() for doc in docs}
     except Exception as e:
         logger.error(f"Firebase error: {e}")
         return {}
 
 def firebase_log(action: str, data: Dict) -> bool:
-    if not FIREBASE_ENABLED:
+    if not FIREBASE_ENABLED or not firestore_db:
         return False
     try:
-        ref = firebase_db.reference(f'/logs/{datetime.now().strftime("%Y-%m-%d")}')
-        ref.push({'action': action, 'data': data, 'timestamp': datetime.now().isoformat()})
+        firestore_db.collection('logs').document(datetime.now().strftime("%Y-%m-%d")).collection('entries').add({
+            'action': action,
+            'data': data,
+            'timestamp': firestore.SERVER_TIMESTAMP
+        })
         return True
     except Exception as e:
         logger.error(f"Firebase error: {e}")
         return False
 
-# ─── COMMAND LOGGING DECORATOR (FIXED) ─────────────────────────────────────
+def firebase_update_stats(stats: Dict) -> bool:
+    if not FIREBASE_ENABLED or not firestore_db:
+        return False
+    try:
+        firestore_db.collection('stats').document('global').set(stats, merge=True)
+        return True
+    except Exception as e:
+        logger.error(f"Firebase error: {e}")
+        return False
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ADVANCED COMMAND LOGGING DECORATOR
+# ═════════════════════════════════════════════════════════════════════════════
 
 def log_command(func):
-    """Decorator to log command execution - FIXED with proper type hints"""
+    """Decorator to log command execution with advanced tracking"""
     async def wrapper(interaction: discord.Interaction, *args, **kwargs):
         command_name = func.__name__
         start_time = time.time()
@@ -504,7 +730,6 @@ def log_command(func):
             logger.error(f"❌ Command '{command_name}' failed: {e}")
             logger.error(traceback.format_exc())
             
-            # Try to send error message to user
             try:
                 if not interaction.response.is_done():
                     await interaction.response.send_message(f"❌ An error occurred: {e}", ephemeral=True)
@@ -514,28 +739,35 @@ def log_command(func):
                 pass
             raise
         finally:
-            # Log to database
             execution_time = time.time() - start_time
             try:
                 db_execute("""
-                    INSERT INTO command_logs (command_name, user_id, guild_id, channel_id, success, error)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO command_logs (command_name, user_id, guild_id, channel_id, success, error, execution_time)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, (
                     command_name,
                     str(interaction.user.id) if interaction.user else None,
                     str(interaction.guild.id) if interaction.guild else None,
                     str(interaction.channel.id) if interaction.channel else None,
                     success,
-                    error_msg
+                    error_msg,
+                    execution_time
                 ))
                 logger.debug(f"⏱️ Command '{command_name}' took {execution_time:.2f}s")
+                
+                # Update Firebase stats
+                if success:
+                    firebase_update_stats({
+                        'total_commands': firestore.INCREMENT(1),
+                        f'commands.{command_name}': firestore.INCREMENT(1)
+                    })
             except Exception as e:
                 logger.error(f"Failed to log command: {e}")
     
     return wrapper
 
 # ═════════════════════════════════════════════════════════════════════════════
-# FLASK APP - BEAUTIFUL WEB UI
+# FLASK APP - ULTIMATE WEB DASHBOARD
 # ═════════════════════════════════════════════════════════════════════════════
 
 flask_app = Flask(__name__)
@@ -545,87 +777,103 @@ flask_app.config['SESSION_PERMANENT'] = False
 flask_app.config['SESSION_FILE_DIR'] = '/data/flask_session'
 CORS(flask_app)
 
-# ─── VERIFICATION PAGE ────────────────────────────────────────────────────────
+# ─── SOCKETIO FOR REAL-TIME UPDATES ──────────────────────────────────────
+
+try:
+    socketio = SocketIO(flask_app, cors_allowed_origins="*", async_mode='threading')
+    logger.info("✅ SocketIO initialized")
+except Exception as e:
+    logger.warning(f"SocketIO not available: {e}")
+    socketio = None
+
+# ─── ULTIMATE VERIFICATION PAGE ────────────────────────────────────────────
 
 @flask_app.route('/')
 def index():
-    return redirect('/verify')
-
-@flask_app.route('/verify')
-def verify_page():
-    guild_id = request.args.get('guild_id')
     return render_template_string("""
     <!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>🔐 Secure Verification</title>
+        <title>🔐 Anion Bot - Ultimate Verification</title>
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800;900&display=swap" rel="stylesheet">
         <style>
             *{margin:0;padding:0;box-sizing:border-box}
             body{font-family:'Inter',sans-serif;background:#0a0a0f;color:#fff;min-height:100vh;display:flex;justify-content:center;align-items:center;overflow:hidden;position:relative}
             .bg-gradient{position:fixed;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(ellipse at 30% 50%,rgba(88,101,242,0.08)0%,transparent 60%),radial-gradient(ellipse at 70% 50%,rgba(118,75,162,0.06)0%,transparent 60%);animation:bgPulse 8s ease-in-out infinite alternate;z-index:0}
             @keyframes bgPulse{0%{transform:scale(1) rotate(0deg)}100%{transform:scale(1.1) rotate(3deg)}}
-            .container{position:relative;z-index:1;max-width:480px;width:100%;padding:50px 40px;background:rgba(20,20,30,0.85);backdrop-filter:blur(24px);border-radius:28px;border:1px solid rgba(255,255,255,0.06);box-shadow:0 40px 80px rgba(0,0,0,0.6);text-align:center;animation:slideUp 0.8s cubic-bezier(0.16,1,0.3,1) forwards;opacity:0;transform:translateY(30px)}
+            .particles{position:fixed;width:100%;height:100%;overflow:hidden;z-index:0;pointer-events:none}
+            .particle{position:absolute;border-radius:50%;background:rgba(88,101,242,0.15);animation:floatParticle 20s infinite linear}
+            @keyframes floatParticle{0%{transform:translate(0,0) scale(1);opacity:0}10%{opacity:1}90%{opacity:1}100%{transform:translate(100px,-100px) scale(0);opacity:0}}
+            .container{position:relative;z-index:1;max-width:520px;width:100%;padding:50px 40px;background:rgba(20,20,30,0.85);backdrop-filter:blur(24px);border-radius:32px;border:1px solid rgba(255,255,255,0.06);box-shadow:0 40px 80px rgba(0,0,0,0.6);text-align:center;animation:slideUp 0.8s cubic-bezier(0.16,1,0.3,1) forwards;opacity:0;transform:translateY(30px)}
             @keyframes slideUp{to{opacity:1;transform:translateY(0)}}
-            .shield-icon{font-size:64px;margin-bottom:16px;display:inline-block;animation:float 3s ease-in-out infinite}
-            @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
-            .logo-text{font-size:32px;font-weight:900;background:linear-gradient(135deg,#fff 30%,#8b8cf7 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:4px}
-            .subtitle{font-size:14px;color:rgba(255,255,255,0.4);margin-bottom:28px}
-            .security-badge{display:inline-flex;align-items:center;gap:8px;background:rgba(88,101,242,0.12);border:1px solid rgba(88,101,242,0.2);padding:8px 20px;border-radius:100px;font-size:11px;font-weight:600;color:#8b8cf7;margin-bottom:24px;text-transform:uppercase}
-            .security-badge .dot{width:6px;height:6px;border-radius:50%;background:#4CAF50;animation:pulseDot 2s infinite}
+            .logo{font-size:72px;margin-bottom:12px;display:inline-block;animation:float 3s ease-in-out infinite}
+            @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
+            h1{font-size:36px;font-weight:900;background:linear-gradient(135deg,#fff 30%,#8b8cf7 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:4px}
+            .subtitle{font-size:15px;color:rgba(255,255,255,0.4);margin-bottom:28px}
+            .badge-container{display:flex;justify-content:center;gap:8px;margin-bottom:24px;flex-wrap:wrap}
+            .badge{display:inline-flex;align-items:center;gap:6px;background:rgba(88,101,242,0.12);border:1px solid rgba(88,101,242,0.15);padding:6px 16px;border-radius:100px;font-size:11px;font-weight:600;color:#8b8cf7}
+            .badge .dot{width:6px;height:6px;border-radius:50%;background:#4CAF50;animation:pulseDot 2s infinite}
             @keyframes pulseDot{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.5;transform:scale(0.8)}}
-            .features{display:flex;flex-direction:column;gap:10px;margin-bottom:28px;text-align:left}
-            .feature-item{display:flex;align-items:center;gap:12px;padding:12px 16px;background:rgba(255,255,255,0.03);border-radius:12px;border:1px solid rgba(255,255,255,0.04);font-size:13px;color:rgba(255,255,255,0.7);transition:all 0.3s}
-            .feature-item:hover{background:rgba(255,255,255,0.06);border-color:rgba(88,101,242,0.15)}
+            .features{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:28px;text-align:left}
+            .feature-item{display:flex;align-items:center;gap:12px;padding:12px 14px;background:rgba(255,255,255,0.03);border-radius:12px;border:1px solid rgba(255,255,255,0.04);font-size:12px;color:rgba(255,255,255,0.7);transition:all 0.3s}
+            .feature-item:hover{background:rgba(255,255,255,0.06);border-color:rgba(88,101,242,0.15);transform:translateY(-2px)}
             .feature-item .icon{font-size:18px;flex-shrink:0;width:28px;text-align:center}
-            .btn-verify{display:inline-flex;align-items:center;justify-content:center;gap:12px;width:100%;padding:18px 32px;background:linear-gradient(135deg,#5865F2,#4752c4);color:#fff;border:none;border-radius:14px;font-size:17px;font-weight:700;cursor:pointer;text-decoration:none;transition:all 0.3s cubic-bezier(0.16,1,0.3,1);position:relative;overflow:hidden;font-family:'Inter',sans-serif}
+            .btn-verify{display:inline-flex;align-items:center;justify-content:center;gap:12px;width:100%;padding:18px 32px;background:linear-gradient(135deg,#5865F2,#4752c4);color:#fff;border:none;border-radius:16px;font-size:17px;font-weight:700;cursor:pointer;text-decoration:none;transition:all 0.3s cubic-bezier(0.16,1,0.3,1);position:relative;overflow:hidden;font-family:'Inter',sans-serif}
             .btn-verify::before{content:'';position:absolute;top:0;left:-100%;width:100%;height:100%;background:linear-gradient(90deg,transparent,rgba(255,255,255,0.1),transparent);transition:left 0.6s}
             .btn-verify:hover::before{left:100%}
             .btn-verify:hover{transform:translateY(-2px);box-shadow:0 12px 40px rgba(88,101,242,0.35)}
             .btn-verify:active{transform:scale(0.98)}
-            .btn-verify .arrow{font-size:20px;transition:transform 0.3s}
-            .btn-verify:hover .arrow{transform:translateX(4px)}
-            .footer-text{margin-top:20px;font-size:11px;color:rgba(255,255,255,0.15)}
-            .particle{position:fixed;border-radius:50%;pointer-events:none;z-index:0;background:rgba(88,101,242,0.15);animation:floatParticle 20s infinite linear}
-            @keyframes floatParticle{0%{transform:translate(0,0) scale(1);opacity:0}10%{opacity:1}90%{opacity:1}100%{transform:translate(100px,-100px) scale(0);opacity:0}}
-            @media(max-width:480px){.container{padding:30px 20px;margin:16px}.logo-text{font-size:26px}.btn-verify{font-size:15px;padding:14px 20px}}
+            .footer-text{margin-top:20px;font-size:11px;color:rgba(255,255,255,0.12)}
+            .footer-text a{color:rgba(88,101,242,0.5);text-decoration:none}
+            @media(max-width:520px){.container{padding:30px 20px;margin:16px}h1{font-size:28px}.features{grid-template-columns:1fr}.btn-verify{font-size:15px;padding:14px 20px}}
         </style>
     </head>
     <body>
         <div class="bg-gradient"></div>
-        <div class="particle" style="width:4px;height:4px;top:10%;left:5%;animation-duration:25s;"></div>
-        <div class="particle" style="width:6px;height:6px;top:30%;right:8%;animation-duration:18s;animation-delay:3s;"></div>
-        <div class="particle" style="width:3px;height:3px;bottom:20%;left:10%;animation-duration:30s;animation-delay:5s;"></div>
-        <div class="particle" style="width:5px;height:5px;bottom:40%;right:5%;animation-duration:22s;animation-delay:7s;"></div>
+        <div class="particles">
+            <div class="particle" style="width:4px;height:4px;top:10%;left:5%;animation-duration:25s;"></div>
+            <div class="particle" style="width:6px;height:6px;top:30%;right:8%;animation-duration:18s;animation-delay:3s;"></div>
+            <div class="particle" style="width:3px;height:3px;bottom:20%;left:10%;animation-duration:30s;animation-delay:5s;"></div>
+            <div class="particle" style="width:5px;height:5px;bottom:40%;right:5%;animation-duration:22s;animation-delay:7s;"></div>
+            <div class="particle" style="width:8px;height:8px;top:50%;left:50%;animation-duration:20s;animation-delay:2s;"></div>
+        </div>
         <div class="container">
-            <div class="shield-icon">🛡️</div>
-            <div class="logo-text">Secure Verification</div>
-            <div class="subtitle">Advanced Identity Verification Protocol</div>
-            <div class="security-badge"><span class="dot"></span>End-to-End Encrypted • 256-bit</div>
+            <div class="logo">🛡️</div>
+            <h1>Anion Bot</h1>
+            <div class="subtitle">Ultimate Security Verification Protocol</div>
+            <div class="badge-container">
+                <span class="badge"><span class="dot"></span>256-bit Encryption</span>
+                <span class="badge">🔐 Zero-Trust</span>
+                <span class="badge">⚡ Instant</span>
+            </div>
             <div class="features">
-                <div class="feature-item"><span class="icon">🔐</span><span>Discord Identity Verification</span></div>
-                <div class="feature-item"><span class="icon">📧</span><span>Email Address Confirmation</span></div>
-                <div class="feature-item"><span class="icon">🏰</span><span>Server Membership Validation</span></div>
-                <div class="feature-item"><span class="icon">⚡</span><span>Instant Role Assignment</span></div>
+                <div class="feature-item"><span class="icon">🔐</span><span>Discord Identity</span></div>
+                <div class="feature-item"><span class="icon">📧</span><span>Email Validation</span></div>
+                <div class="feature-item"><span class="icon">🏰</span><span>Server Membership</span></div>
+                <div class="feature-item"><span class="icon">🎯</span><span>Role Assignment</span></div>
+                <div class="feature-item"><span class="icon">📊</span><span>Analytics</span></div>
+                <div class="feature-item"><span class="icon">🔒</span><span>Secure Storage</span></div>
             </div>
             <a href="/oauth?guild_id={{ guild_id }}" class="btn-verify">
                 <span>Verify with Discord</span>
-                <span class="arrow">➜</span>
+                <span>➜</span>
             </a>
-            <div class="footer-text">🔒 Your data is encrypted and never shared</div>
+            <div class="footer-text">🔒 End-to-end encrypted • Powered by <a href="#">Anion Security</a></div>
         </div>
     </body>
     </html>
-    """, guild_id=guild_id or '')
+    """, guild_id=request.args.get('guild_id') or '')
+
+# ─── OAUTH ROUTES ──────────────────────────────────────────────────────────
 
 @flask_app.route('/oauth')
 def oauth():
     guild_id = request.args.get('guild_id')
     if not guild_id:
         return "❌ No guild_id provided", 400
-    oauth_url = f"https://discord.com/api/oauth2/authorize?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code&scope=identify%20email%20guilds&state={guild_id}"
+    oauth_url = f"https://discord.com/api/oauth2/authorize?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code&scope=identify%20email%20guilds%20connections&state={guild_id}"
     return redirect(oauth_url)
 
 @flask_app.route('/callback')
@@ -683,15 +931,13 @@ def callback():
         VALUES (?,?,?,?,?)
     """, (user_data.get('id'), guild_id, access_token, refresh_token, expires_at))
 
-    # Save to Firebase
-    firebase_data = {
+    firebase_save_user(user_data.get('id'), guild_id, {
         'user_id': user_data.get('id'),
         'username': user_data.get('username'),
         'email': user_data.get('email', ''),
         'guilds': guilds_data,
         'verified_at': datetime.now().isoformat()
-    }
-    firebase_save_user(user_data.get('id'), guild_id, firebase_data)
+    })
     firebase_log('verification', {'user_id': user_data.get('id'), 'guild_id': guild_id})
 
     guild_name = guild_id
@@ -707,14 +953,14 @@ def callback():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>✅ Verification Complete</title>
+        <title>✅ Verification Complete - Anion Bot</title>
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800;900&display=swap" rel="stylesheet">
         <style>
             *{margin:0;padding:0;box-sizing:border-box}
             body{font-family:'Inter',sans-serif;background:#0a0a0f;color:#fff;min-height:100vh;display:flex;justify-content:center;align-items:center;overflow:hidden}
             .bg-gradient{position:fixed;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(ellipse at 70% 30%,rgba(76,175,80,0.06)0%,transparent 60%),radial-gradient(ellipse at 30% 70%,rgba(88,101,242,0.04)0%,transparent 60%);animation:bgPulse 10s ease-in-out infinite alternate;z-index:0}
             @keyframes bgPulse{0%{transform:scale(1) rotate(0deg)}100%{transform:scale(1.05) rotate(-2deg)}}
-            .container{position:relative;z-index:1;max-width:520px;width:100%;padding:50px 40px;background:rgba(20,20,30,0.85);backdrop-filter:blur(24px);border-radius:28px;border:1px solid rgba(76,175,80,0.15);box-shadow:0 40px 80px rgba(0,0,0,0.6),0 0 60px rgba(76,175,80,0.05);text-align:center;animation:slideUp 0.8s cubic-bezier(0.16,1,0.3,1) forwards;opacity:0;transform:translateY(30px)}
+            .container{position:relative;z-index:1;max-width:540px;width:100%;padding:50px 40px;background:rgba(20,20,30,0.85);backdrop-filter:blur(24px);border-radius:32px;border:1px solid rgba(76,175,80,0.15);box-shadow:0 40px 80px rgba(0,0,0,0.6),0 0 60px rgba(76,175,80,0.05);text-align:center;animation:slideUp 0.8s cubic-bezier(0.16,1,0.3,1) forwards;opacity:0;transform:translateY(30px)}
             @keyframes slideUp{to{opacity:1;transform:translateY(0)}}
             .success-icon{font-size:72px;margin-bottom:12px;animation:successPulse 2s ease-in-out infinite}
             @keyframes successPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
@@ -732,22 +978,17 @@ def callback():
             .btn-done{display:inline-flex;align-items:center;justify-content:center;gap:10px;width:100%;padding:16px 32px;background:linear-gradient(135deg,#4CAF50,#388E3C);color:#fff;border:none;border-radius:14px;font-size:16px;font-weight:700;cursor:pointer;text-decoration:none;font-family:'Inter',sans-serif;transition:all 0.3s cubic-bezier(0.16,1,0.3,1)}
             .btn-done:hover{transform:translateY(-2px);box-shadow:0 12px 40px rgba(76,175,80,0.35)}
             .btn-done:active{transform:scale(0.98)}
-            .footer-text{margin-top:16px;font-size:11px;color:rgba(255,255,255,0.15)}
-            .particle{position:fixed;border-radius:50%;pointer-events:none;z-index:0;background:rgba(76,175,80,0.1);animation:floatParticle 25s infinite linear}
-            @keyframes floatParticle{0%{transform:translate(0,0) scale(1);opacity:0}10%{opacity:1}90%{opacity:1}100%{transform:translate(-80px,-120px) scale(0);opacity:0}}
+            .footer-text{margin-top:16px;font-size:11px;color:rgba(255,255,255,0.12)}
             @media(max-width:480px){.container{padding:30px 20px;margin:16px}h1{font-size:26px}.info-grid{grid-template-columns:1fr}.btn-done{font-size:15px;padding:14px 20px}}
         </style>
     </head>
     <body>
         <div class="bg-gradient"></div>
-        <div class="particle" style="width:4px;height:4px;top:15%;left:8%;animation-duration:22s;"></div>
-        <div class="particle" style="width:6px;height:6px;top:25%;right:12%;animation-duration:18s;animation-delay:4s;"></div>
-        <div class="particle" style="width:3px;height:3px;bottom:30%;left:15%;animation-duration:28s;animation-delay:6s;"></div>
         <div class="container">
             <div class="glow-ring"><div class="success-icon">✅</div></div>
             <h1>Verification Complete!</h1>
-            <div class="subtitle">Identity successfully confirmed</div>
-            <div class="verified-badge"><span class="check">✦</span><span>Verified • {{ username }}#{{ discriminator }}</span></div>
+            <div class="subtitle">Identity successfully confirmed • Welcome to the server!</div>
+            <div class="verified-badge">✦ Verified • {{ username }}#{{ discriminator }}</div>
             <div class="info-grid">
                 <div class="info-card"><div class="label">👤 User</div><div class="value username">{{ username }}</div></div>
                 <div class="info-card"><div class="label">🆔 User ID</div><div class="value">{{ user_id }}</div></div>
@@ -755,8 +996,8 @@ def callback():
                 <div class="info-card"><div class="label">🏰 Server</div><div class="value guild">{{ guild_name }}</div></div>
                 <div class="info-card" style="grid-column:1/-1;"><div class="label">🔑 Verified At</div><div class="value">{{ verified_at }}</div></div>
             </div>
-            <a href="https://discord.com/app" class="btn-done"><span>🎯</span><span>Return to Discord</span></a>
-            <div class="footer-text">🔒 Your verification status is securely stored</div>
+            <a href="https://discord.com/app" class="btn-done">🎯 Return to Discord</a>
+            <div class="footer-text">🔒 Your verification is securely stored • Anion Security</div>
         </div>
     </body>
     </html>
@@ -796,10 +1037,8 @@ async def assign_verified_role(user_id: str, guild_id: str):
         if unrole and unrole in member.roles:
             await member.remove_roles(unrole)
 
-    # Generate password for user
     await generate_user_password(member, guild_id)
 
-    # Log
     log_settings = db_fetch_one("SELECT log_channel_id FROM guild_settings WHERE guild_id=?", (guild_id,))
     if log_settings and log_settings['log_channel_id']:
         channel = guild.get_channel(int(log_settings['log_channel_id']))
@@ -813,7 +1052,7 @@ async def assign_verified_role(user_id: str, guild_id: str):
             embed.add_field(name="User ID", value=member.id, inline=True)
             await channel.send(embed=embed)
 
-# ─── SUPERADMIN ROUTES ──────────────────────────────────────────────────────
+# ─── SUPERADMIN DASHBOARD ──────────────────────────────────────────────────
 
 @flask_app.route('/superadmin.html')
 def superadmin_login():
@@ -823,22 +1062,19 @@ def superadmin_login():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>🔐 Superadmin Login</title>
+        <title>🛡️ Superadmin - Anion Bot</title>
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800;900&display=swap" rel="stylesheet">
         <style>
             *{margin:0;padding:0;box-sizing:border-box}
             body{font-family:'Inter',sans-serif;background:#0a0a0f;color:#fff;min-height:100vh;display:flex;justify-content:center;align-items:center;overflow:hidden;position:relative}
             .bg-gradient{position:fixed;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(ellipse at 30% 50%,rgba(255,50,50,0.08)0%,transparent 60%),radial-gradient(ellipse at 70% 50%,rgba(200,0,0,0.06)0%,transparent 60%);animation:bgPulse 8s ease-in-out infinite alternate;z-index:0}
             @keyframes bgPulse{0%{transform:scale(1) rotate(0deg)}100%{transform:scale(1.1) rotate(3deg)}}
-            .container{position:relative;z-index:1;max-width:420px;width:100%;padding:45px 35px;background:rgba(20,20,30,0.9);backdrop-filter:blur(24px);border-radius:28px;border:1px solid rgba(255,50,50,0.15);box-shadow:0 40px 80px rgba(0,0,0,0.6);text-align:center;animation:slideUp 0.8s cubic-bezier(0.16,1,0.3,1) forwards;opacity:0;transform:translateY(30px)}
+            .container{position:relative;z-index:1;max-width:440px;width:100%;padding:45px 35px;background:rgba(20,20,30,0.9);backdrop-filter:blur(24px);border-radius:32px;border:1px solid rgba(255,50,50,0.15);box-shadow:0 40px 80px rgba(0,0,0,0.6);text-align:center;animation:slideUp 0.8s cubic-bezier(0.16,1,0.3,1) forwards;opacity:0;transform:translateY(30px)}
             @keyframes slideUp{to{opacity:1;transform:translateY(0)}}
             .shield-icon{font-size:56px;margin-bottom:12px;animation:float 3s ease-in-out infinite}
             @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
             h1{font-size:28px;font-weight:800;background:linear-gradient(135deg,#ff4444 30%,#ff6b6b 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:4px}
             .subtitle{font-size:13px;color:rgba(255,255,255,0.4);margin-bottom:24px}
-            .security-badge{display:inline-flex;align-items:center;gap:8px;background:rgba(255,50,50,0.12);border:1px solid rgba(255,50,50,0.2);padding:6px 16px;border-radius:100px;font-size:10px;font-weight:600;color:#ff6b6b;margin-bottom:24px;text-transform:uppercase}
-            .security-badge .dot{width:6px;height:6px;border-radius:50%;background:#4CAF50;animation:pulseDot 2s infinite}
-            @keyframes pulseDot{0%,100%{opacity:1}50%{opacity:0.5}}
             .input-group{text-align:left;margin-bottom:16px}
             .input-group label{font-size:12px;font-weight:600;color:rgba(255,255,255,0.5);display:block;margin-bottom:6px;letter-spacing:0.5px}
             .input-group input{width:100%;padding:14px 16px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:12px;color:#fff;font-size:15px;font-family:'Inter',sans-serif;transition:all 0.3s}
@@ -849,21 +1085,15 @@ def superadmin_login():
             .btn-login:active{transform:scale(0.98)}
             .error-msg{color:#ff4444;font-size:13px;margin-top:12px;display:none;background:rgba(255,50,50,0.1);padding:10px;border-radius:8px;border:1px solid rgba(255,50,50,0.2)}
             .footer-text{margin-top:20px;font-size:11px;color:rgba(255,255,255,0.12)}
-            .particle{position:fixed;border-radius:50%;pointer-events:none;z-index:0;background:rgba(255,50,50,0.1);animation:floatParticle 20s infinite linear}
-            @keyframes floatParticle{0%{transform:translate(0,0) scale(1);opacity:0}10%{opacity:1}90%{opacity:1}100%{transform:translate(100px,-100px) scale(0);opacity:0}}
             @media(max-width:480px){.container{padding:30px 20px;margin:16px}h1{font-size:24px}}
         </style>
     </head>
     <body>
         <div class="bg-gradient"></div>
-        <div class="particle" style="width:4px;height:4px;top:10%;left:5%;animation-duration:25s;"></div>
-        <div class="particle" style="width:6px;height:6px;top:30%;right:8%;animation-duration:18s;animation-delay:3s;"></div>
         <div class="container">
             <div class="shield-icon">🛡️</div>
             <h1>Superadmin Access</h1>
             <div class="subtitle">Secure • Encrypted • Authorized Only</div>
-            <div class="security-badge"><span class="dot"></span>256-bit Encryption • Restricted</div>
-
             <form method="POST" action="/superadmin-login">
                 <div class="input-group">
                     <label>👤 Username</label>
@@ -875,9 +1105,7 @@ def superadmin_login():
                 </div>
                 <button type="submit" class="btn-login">🚪 Access Dashboard</button>
             </form>
-
             <div class="error-msg" id="errorMsg">❌ Invalid credentials</div>
-
             <div class="footer-text">🔒 Authorized personnel only • All access is logged</div>
         </div>
         <script>
@@ -903,81 +1131,113 @@ def superadmin_login_handler():
 def superadmin_dashboard():
     if session.get('role') != 'superadmin':
         return redirect(url_for('superadmin_login'))
+    
     guilds = []
     if bot_instance:
         for guild in bot_instance.guilds:
             guilds.append({'id': guild.id, 'name': guild.name, 'member_count': guild.member_count})
+    
     users = db_fetch_all("SELECT * FROM verified_users")
     
-    # Fix Firebase passwords retrieval
     passwords = {}
-    if FIREBASE_ENABLED:
+    if FIREBASE_ENABLED and firestore_db:
         try:
-            ref = firebase_db.reference('/passwords')
-            data = ref.get()
-            if data:
-                passwords = data
+            collections = firestore_db.collection('passwords').list_documents()
+            for coll in collections:
+                docs = coll.collection('users').stream()
+                for doc in docs:
+                    data = doc.to_dict()
+                    if coll.id not in passwords:
+                        passwords[coll.id] = {}
+                    passwords[coll.id][doc.id] = data
         except Exception as e:
             logger.error(f"Failed to get passwords from Firebase: {e}")
     
-    special_notes = firebase_get_special_notes('all') if FIREBASE_ENABLED else {}
-
     return render_template_string("""
     <!DOCTYPE html>
-    <html><head><title>📊 Dashboard</title>
+    <html><head><title>📊 Anion Dashboard</title>
     <style>
+        *{margin:0;padding:0;box-sizing:border-box}
         body{background:#0a0a1a;color:#fff;font-family:'Segoe UI',Arial;padding:20px}
         .container{max-width:1400px;margin:0 auto}
-        .header{display:flex;justify-content:space-between;border-bottom:1px solid #333;padding:20px 0;margin-bottom:30px}
-        h1{background:linear-gradient(135deg,#ff4444,#ff6b6b);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-        .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:30px}
-        .stat-card{background:#1a1a2e;padding:24px;border-radius:16px;text-align:center}
-        .stat-number{font-size:2.5em;font-weight:800;color:#ff6b6b}
-        .stat-label{color:#888}
-        .guild-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:16px}
-        .guild-card{background:#1a1a2e;padding:20px;border-radius:16px;border:1px solid #333}
-        .guild-card a{color:#ff6b6b;text-decoration:none}
+        .header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #333;padding:20px 0;margin-bottom:30px}
+        .header h1{background:linear-gradient(135deg,#ff4444,#ff6b6b);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-size:32px}
         .logout-btn{padding:10px 20px;background:#ff4444;color:#fff;border:none;border-radius:8px;cursor:pointer;text-decoration:none}
-        table{width:100%;border-collapse:collapse;margin-top:20px}
+        .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:30px}
+        .stat-card{background:#1a1a2e;padding:24px;border-radius:16px;text-align:center;border:1px solid #333;transition:all 0.3s}
+        .stat-card:hover{transform:translateY(-4px);border-color:#ff6b6b}
+        .stat-number{font-size:2.5em;font-weight:800;color:#ff6b6b}
+        .stat-label{color:#888;margin-top:4px}
+        .guild-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-bottom:30px}
+        .guild-card{background:#1a1a2e;padding:20px;border-radius:16px;border:1px solid #333;transition:all 0.3s}
+        .guild-card:hover{transform:translateY(-4px);border-color:#ff6b6b}
+        .guild-card h3{color:#fff;margin-bottom:4px}
+        .guild-card .info{color:#888;font-size:13px}
+        .guild-card a{color:#ff6b6b;text-decoration:none;display:inline-block;margin-top:12px}
+        table{width:100%;border-collapse:collapse;margin-top:20px;background:#1a1a2e;border-radius:12px;overflow:hidden}
         th,td{padding:12px;text-align:left;border-bottom:1px solid #333}
+        th{background:#2a2a4e;color:#ff6b6b;font-weight:600}
         .token{font-family:monospace;font-size:11px;color:#ff6b6b}
-        .password-table{font-size:12px}
-        .password-table td{padding:8px}
+        h2{color:#fff;margin:30px 0 16px;font-size:22px;border-left:4px solid #ff6b6b;padding-left:12px}
     </style>
     </head>
     <body>
     <div class="container">
-        <div class="header"><div><h1>🛡️ Superadmin Dashboard</h1></div><div><a href="/superadmin-logout" class="logout-btn">🚪 Logout</a></div></div>
+        <div class="header">
+            <h1>🛡️ Anion Superadmin Dashboard</h1>
+            <a href="/superadmin-logout" class="logout-btn">🚪 Logout</a>
+        </div>
+        
         <div class="stats">
             <div class="stat-card"><div class="stat-number">{{ total_guilds }}</div><div class="stat-label">Servers</div></div>
             <div class="stat-card"><div class="stat-number">{{ total_users }}</div><div class="stat-label">Verified Users</div></div>
             <div class="stat-card"><div class="stat-number">{{ total_passwords }}</div><div class="stat-label">User Passwords</div></div>
+            <div class="stat-card"><div class="stat-number">{{ total_commands }}</div><div class="stat-label">Commands Executed</div></div>
         </div>
+        
         <h2>🏰 Servers</h2>
         <div class="guild-grid">
             {% for guild in guilds %}
-            <div class="guild-card"><div style="font-weight:600;">{{ guild.name }}</div><div style="color:#888;font-size:13px;">👥 {{ guild.member_count }}</div><div style="margin-top:12px;"><a href="/server/{{ guild.id }}.html">🔧 Manage →</a></div></div>
+            <div class="guild-card">
+                <h3>{{ guild.name }}</h3>
+                <div class="info">👥 {{ guild.member_count }} members</div>
+                <div class="info">🆔 {{ guild.id }}</div>
+                <a href="/server/{{ guild.id }}.html">🔧 Manage →</a>
+            </div>
             {% endfor %}
         </div>
-        <h2>👤 Verified Users ({{ total_users }})</h2>
+        
+        <h2>👤 Verified Users</h2>
         <table>
-            <tr><th>User</th><th>Email</th><th>Guild</th><th>Token</th><th>Verified At</th></tr>
-            {% for user in users %}
-            <tr><td>{{ user.username or 'Unknown' }}</td><td>{{ user.email or 'N/A' }}</td><td>{{ user.guild_id or 'N/A' }}</td><td><span class="token">{{ user.access_token[:30] if user.access_token else 'None' }}...</span></td><td>{{ user.verified_at[:16] if user.verified_at else 'N/A' }}</td></tr>
-            {% endfor %}
-        </table>
-        <h2>🔑 User Passwords ({{ total_passwords }})</h2>
-        <table class="password-table">
-            <tr><th>User ID</th><th>Username</th><th>Password</th><th>Role Level</th></tr>
-            {% for guild_id, users in passwords.items() %}
-                {% for user_id, data in users.items() %}
-                <tr><td>{{ user_id }}</td><td>{{ data.username or 'N/A' }}</td><td>{{ data.password or 'N/A' }}</td><td>{{ data.role_level or 'user' }}</td></tr>
+            <thead><tr><th>Username</th><th>Email</th><th>Guild</th><th>Token</th><th>Verified At</th></tr></thead>
+            <tbody>
+                {% for user in users %}
+                <tr><td>{{ user.username or 'Unknown' }}</td><td>{{ user.email or 'N/A' }}</td><td>{{ user.guild_id or 'N/A' }}</td><td><span class="token">{{ user.access_token[:30] if user.access_token else 'None' }}...</span></td><td>{{ user.verified_at[:16] if user.verified_at else 'N/A' }}</td></tr>
                 {% endfor %}
-            {% endfor %}
+            </tbody>
+        </table>
+        
+        <h2>🔑 User Passwords</h2>
+        <table>
+            <thead><tr><th>User ID</th><th>Username</th><th>Password</th><th>Role Level</th></tr></thead>
+            <tbody>
+                {% for guild_id, users in passwords.items() %}
+                    {% for user_id, data in users.items() %}
+                    <tr><td>{{ user_id }}</td><td>{{ data.username or 'N/A' }}</td><td><span class="token">{{ data.password or 'N/A' }}</span></td><td>{{ data.role_level or 'user' }}</td></tr>
+                    {% endfor %}
+                {% endfor %}
+            </tbody>
         </table>
     </div></body></html>
-    """, guilds=guilds, users=users, total_guilds=len(guilds), total_users=len(users),
-    total_passwords=sum(len(users) for users in passwords.values()) if passwords else 0, passwords=passwords)
+    """, 
+    guilds=guilds, 
+    users=users, 
+    total_guilds=len(guilds), 
+    total_users=len(users),
+    total_passwords=sum(len(users) for users in passwords.values()) if passwords else 0,
+    passwords=passwords,
+    total_commands=db_count('command_logs')
+    )
 
 @flask_app.route('/superadmin-logout')
 def superadmin_logout():
@@ -1006,27 +1266,33 @@ def server_page(guild_id):
 
     return render_template_string("""
     <!DOCTYPE html>
-    <html><head><title>🔧 Server</title>
+    <html><head><title>🔧 {{ guild.name }}</title>
     <style>
+        *{margin:0;padding:0;box-sizing:border-box}
         body{background:#0a0a1a;color:#fff;font-family:'Segoe UI',Arial;padding:20px}
         .container{max-width:1400px;margin:0 auto}
-        .header{display:flex;justify-content:space-between;border-bottom:1px solid #333;padding:20px 0;margin-bottom:30px}
-        h1{background:linear-gradient(135deg,#ff4444,#ff6b6b);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+        .header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #333;padding:20px 0;margin-bottom:30px}
+        .header h1{background:linear-gradient(135deg,#ff4444,#ff6b6b);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-size:28px}
         .back-btn{padding:10px 20px;background:#333;color:#fff;text-decoration:none;border-radius:8px}
         .settings-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px;margin-bottom:20px}
         .setting-card{background:#1a1a2e;padding:16px;border-radius:12px;border:1px solid #333}
         .setting-card .label{color:#888;font-size:12px}
-        .setting-card .value{font-weight:600}
+        .setting-card .value{font-weight:600;margin-top:4px}
         .setting-card .value.enabled{color:#4CAF50}
         .setting-card .value.disabled{color:#ff4444}
-        table{width:100%;border-collapse:collapse;font-size:13px}
+        table{width:100%;border-collapse:collapse;margin-top:16px;background:#1a1a2e;border-radius:12px;overflow:hidden}
         th,td{padding:10px;text-align:left;border-bottom:1px solid #333}
+        th{background:#2a2a4e;color:#ff6b6b;font-weight:600}
         .member-avatar{width:32px;height:32px;border-radius:50%;vertical-align:middle;margin-right:8px}
+        h2{color:#fff;margin:30px 0 16px;font-size:20px;border-left:4px solid #ff6b6b;padding-left:12px}
     </style>
     </head>
     <body>
     <div class="container">
-        <div class="header"><div><h1>🔧 {{ guild.name }}</h1><div style="color:#888;font-size:13px;">ID: {{ guild.id }}</div></div><div><a href="/superadmin-dashboard.html" class="back-btn">← Back</a></div></div>
+        <div class="header">
+            <div><h1>🔧 {{ guild.name }}</h1><div style="color:#888;font-size:13px;">ID: {{ guild.id }}</div></div>
+            <a href="/superadmin-dashboard.html" class="back-btn">← Back</a>
+        </div>
 
         <h2>⚙️ Server Settings</h2>
         <div class="settings-grid">
@@ -1036,6 +1302,8 @@ def server_page(guild_id):
             <div class="setting-card"><div class="label">Anti-Nuke</div><div class="value {{ 'enabled' if settings.anti_nuke else 'disabled' }}">{{ '✅ Enabled' if settings.anti_nuke else '❌ Disabled' }}</div></div>
             <div class="setting-card"><div class="label">Raid Protection</div><div class="value {{ 'enabled' if settings.raid_protection else 'disabled' }}">{{ '✅ Enabled' if settings.raid_protection else '❌ Disabled' }}</div></div>
             <div class="setting-card"><div class="label">Auto-Mod</div><div class="value {{ 'enabled' if settings.automod_enabled else 'disabled' }}">{{ '✅ Enabled' if settings.automod_enabled else '❌ Disabled' }}</div></div>
+            <div class="setting-card"><div class="label">Leveling</div><div class="value {{ 'enabled' if settings.leveling_enabled else 'disabled' }}">{{ '✅ Enabled' if settings.leveling_enabled else '❌ Disabled' }}</div></div>
+            <div class="setting-card"><div class="label">XP Multiplier</div><div class="value">{{ settings.xp_multiplier or '1.0' }}x</div></div>
         </div>
 
         <h2>👥 Members</h2>
@@ -1054,64 +1322,161 @@ def server_page(guild_id):
     </div></body></html>
     """, guild=guild, settings=settings, members=members)
 
-# ─── API ROUTES ──────────────────────────────────────────────────────────────
+# ─── API ROUTES ────────────────────────────────────────────────────────────
 
-@flask_app.route('/api/ban', methods=['POST'])
-def api_ban():
-    if session.get('role') != 'superadmin':
-        return jsonify({'error': 'Unauthorized'}), 401
+@flask_app.route('/api/stats', methods=['GET'])
+def api_stats():
     try:
-        data = request.json
-        guild = bot_instance.get_guild(int(data['guild_id']))
-        member = guild.get_member(int(data['user_id']))
-        asyncio.run_coroutine_threadsafe(member.ban(reason=data.get('reason', 'No reason')), bot_instance.loop).result()
-        return jsonify({'success': True})
+        total_commands = db_count('command_logs')
+        total_verified = db_count('verified_users')
+        total_tickets = db_count('tickets')
+        
+        return jsonify({
+            'success': True,
+            'stats': {
+                'total_commands': total_commands,
+                'total_verified': total_verified,
+                'total_tickets': total_tickets,
+                'total_guilds': len(bot_instance.guilds) if bot_instance else 0,
+                'uptime': str(datetime.now() - bot_instance.start_time).split('.')[0] if bot_instance else '0'
+            }
+        })
     except Exception as e:
-        logger.error(f"API ban error: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
-@flask_app.route('/api/kick', methods=['POST'])
-def api_kick():
-    if session.get('role') != 'superadmin':
-        return jsonify({'error': 'Unauthorized'}), 401
+@flask_app.route('/api/guilds', methods=['GET'])
+def api_guilds():
     try:
-        data = request.json
-        guild = bot_instance.get_guild(int(data['guild_id']))
-        member = guild.get_member(int(data['user_id']))
-        asyncio.run_coroutine_threadsafe(member.kick(reason=data.get('reason', 'No reason')), bot_instance.loop).result()
-        return jsonify({'success': True})
+        guilds = []
+        if bot_instance:
+            for guild in bot_instance.guilds:
+                guilds.append({
+                    'id': str(guild.id),
+                    'name': guild.name,
+                    'member_count': guild.member_count,
+                    'icon': guild.icon.url if guild.icon else None
+                })
+        return jsonify({'success': True, 'guilds': guilds})
     except Exception as e:
-        logger.error(f"API kick error: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 # ═════════════════════════════════════════════════════════════════════════════
-# DISCORD BOT - COMPLETE WITH ALL FEATURES
+# DISCORD BOT - ULTIMATE EDITION WITH ALL FEATURES
 # ═════════════════════════════════════════════════════════════════════════════
 
 class AnionBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.all()
-        super().__init__(command_prefix='!', intents=intents)
+        super().__init__(command_prefix='/', intents=intents)
         self.start_time = datetime.now()
         self.logger = logger
         self.command_count = 0
+        self.pokemon_spawn_task = None
 
     async def setup_hook(self):
         await self.register_commands()
         await self.tree.sync()
+        self.pokemon_spawn_task = self.loop.create_task(self.pokemon_spawn_loop())
         logger.info('✅ All commands synced!')
 
+    # ─── POKEMON SPAWN LOOP ──────────────────────────────────────────────
+    
+    async def pokemon_spawn_loop(self):
+        """Automatic Pokemon spawning system"""
+        await self.wait_until_ready()
+        
+        POKEMON_LIST = [
+            {"name": "Pikachu", "emoji": "⚡", "rarity": "common", "base_cp": 300, "max_cp": 800},
+            {"name": "Charizard", "emoji": "🔥", "rarity": "rare", "base_cp": 800, "max_cp": 1800},
+            {"name": "Mewtwo", "emoji": "🔮", "rarity": "legendary", "base_cp": 1500, "max_cp": 3000},
+            {"name": "Mew", "emoji": "✨", "rarity": "mythical", "base_cp": 1200, "max_cp": 2500},
+            {"name": "Dragonite", "emoji": "🐉", "rarity": "rare", "base_cp": 900, "max_cp": 2000},
+            {"name": "Gengar", "emoji": "👻", "rarity": "uncommon", "base_cp": 600, "max_cp": 1400},
+            {"name": "Snorlax", "emoji": "😴", "rarity": "rare", "base_cp": 700, "max_cp": 1600},
+            {"name": "Eevee", "emoji": "🦊", "rarity": "common", "base_cp": 250, "max_cp": 700},
+            {"name": "Lucario", "emoji": "🥊", "rarity": "rare", "base_cp": 800, "max_cp": 1900},
+            {"name": "Gardevoir", "emoji": "💜", "rarity": "uncommon", "base_cp": 650, "max_cp": 1500},
+        ]
+        
+        POKEMON_RARITIES = {
+            "common": {"color": 0x808080, "emoji": "⬜", "weight": 50},
+            "uncommon": {"color": 0x00FF00, "emoji": "🟩", "weight": 25},
+            "rare": {"color": 0x0000FF, "emoji": "🟦", "weight": 15},
+            "legendary": {"color": 0xFFD700, "emoji": "🌟", "weight": 8},
+            "mythical": {"color": 0xFF69B4, "emoji": "💫", "weight": 2},
+        }
+        
+        last_spawns = {}
+        
+        while not self.is_closed():
+            try:
+                settings = db_fetch_all("SELECT guild_id FROM guild_settings")
+                for setting in settings:
+                    guild_id = setting['guild_id']
+                    guild = self.get_guild(int(guild_id))
+                    if not guild:
+                        continue
+                    
+                    if guild_id not in last_spawns:
+                        last_spawns[guild_id] = datetime.now() - timedelta(hours=24)
+                    
+                    if (datetime.now() - last_spawns[guild_id]).total_seconds() > 3600:
+                        pokemon = random.choice(POKEMON_LIST)
+                        rarity = pokemon["rarity"]
+                        rarity_info = POKEMON_RARITIES[rarity]
+                        
+                        is_shiny = random.random() < 0.02
+                        is_legendary = rarity == "legendary"
+                        is_mythical = rarity == "mythical"
+                        
+                        cp = random.randint(pokemon["base_cp"], pokemon["max_cp"])
+                        
+                        # Find spawn channel
+                        spawn_channel_id = db_fetch_one(
+                            "SELECT verification_channel_id FROM guild_settings WHERE guild_id=?", 
+                            (guild_id,)
+                        )
+                        if spawn_channel_id and spawn_channel_id['verification_channel_id']:
+                            channel = guild.get_channel(int(spawn_channel_id['verification_channel_id']))
+                            if channel:
+                                shiny_text = "✨ **SHINY!** ✨" if is_shiny else ""
+                                rarity_text = "🌟 **LEGENDARY!** 🌟" if is_legendary else ""
+                                rarity_text = "💫 **MYTHICAL!** 💫" if is_mythical else rarity_text
+                                
+                                embed = discord.Embed(
+                                    title=f"🎣 Wild {pokemon['name']} Has Spawned!",
+                                    description=f"A wild {pokemon['name']} has appeared! {shiny_text} {rarity_text}\n\n"
+                                               f"**CP:** {cp}\n"
+                                               f"**Rarity:** {rarity.capitalize()} {rarity_info['emoji']}\n"
+                                               f"**Use `/catch` to try and catch it!**",
+                                    color=rarity_info["color"]
+                                )
+                                embed.set_footer(text=f"Spawned in {guild.name}")
+                                
+                                view = PokemonCatchView(pokemon, cp, is_shiny, is_legendary, is_mythical, guild_id)
+                                await channel.send(embed=embed, view=view)
+                                
+                                last_spawns[guild_id] = datetime.now()
+                                logger.info(f"Pokemon spawned in {guild.name}: {pokemon['name']}")
+                
+                await asyncio.sleep(60)  # Check every minute
+                
+            except Exception as e:
+                logger.error(f"Pokemon spawn loop error: {e}")
+                await asyncio.sleep(60)
+
+    # ─── REGISTER ALL COMMANDS ────────────────────────────────────────────
+    
     async def register_commands(self):
         
         # ═════════════════════════════════════════════════════════════════════
-        # 1. VERIFICATION COMMANDS
+        # SECTION 1: VERIFICATION SYSTEM
         # ═════════════════════════════════════════════════════════════════════
-
+        
         @self.tree.command(name="verify", description="🔐 Start verification")
         @app_commands.checks.cooldown(1, 10.0)
         @log_command
         async def verify(interaction: discord.Interaction):
-            logger.info(f"User {interaction.user} started verification")
             verify_url = f"https://edith.up.railway.app/verify?guild_id={interaction.guild.id}"
             embed = discord.Embed(
                 title="🔐 Verification Required",
@@ -1137,7 +1502,7 @@ class AnionBot(commands.Bot):
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
-        @self.tree.command(name="setverifiedrole", description="⚙️ Set verified role (Admin)")
+        @self.tree.command(name="setverifiedrole", description="⚙️ Set verified role")
         @app_commands.default_permissions(administrator=True)
         @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(role="Role for verified users")
@@ -1148,7 +1513,7 @@ class AnionBot(commands.Bot):
             embed = discord.Embed(title="✅ Verified Role Set", description=f"Set to {role.mention}", color=discord.Color.green())
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="setunverifiedrole", description="⚙️ Set unverified role (Admin)")
+        @self.tree.command(name="setunverifiedrole", description="⚙️ Set unverified role")
         @app_commands.default_permissions(administrator=True)
         @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(role="Role for unverified users")
@@ -1159,7 +1524,7 @@ class AnionBot(commands.Bot):
             embed = discord.Embed(title="✅ Unverified Role Set", description=f"Set to {role.mention}", color=discord.Color.green())
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="setlogchannel", description="⚙️ Set log channel (Admin)")
+        @self.tree.command(name="setlogchannel", description="⚙️ Set log channel")
         @app_commands.default_permissions(administrator=True)
         @app_commands.checks.cooldown(1, 5.0)
         @app_commands.describe(channel="Channel for logs")
@@ -1170,7 +1535,7 @@ class AnionBot(commands.Bot):
             embed = discord.Embed(title="✅ Log Channel Set", description=f"Set to {channel.mention}", color=discord.Color.green())
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="setupverify", description="⚙️ Setup verification (Admin)")
+        @self.tree.command(name="setupverify", description="⚙️ Setup verification system")
         @app_commands.default_permissions(administrator=True)
         @app_commands.checks.cooldown(1, 30.0)
         @log_command
@@ -1213,14 +1578,15 @@ class AnionBot(commands.Bot):
             await interaction.response.send_message(embed=embed)
 
         # ═════════════════════════════════════════════════════════════════════
-        # 2. GIVEAWAY COMMANDS - FIXED
+        # SECTION 2: GIVEAWAY SYSTEM - ULTIMATE
         # ═════════════════════════════════════════════════════════════════════
 
-        class GiveawayModal(Modal, title="🎁 Create Giveaway"):
+        class GiveawayModal(Modal, title="🎁 Create Ultimate Giveaway"):
             prize = TextInput(label="🏆 Prize", placeholder="What are you giving away?", required=True, max_length=100)
             winners = TextInput(label="👑 Winners", placeholder="Number of winners (1-10)", required=True, max_length=2)
             duration = TextInput(label="⏱️ Duration", placeholder="30s, 5m, 1h, 2d, 7d", required=True, max_length=10)
             description = TextInput(label="📝 Description", placeholder="Describe the giveaway...", required=False, max_length=200, style=discord.TextStyle.paragraph)
+            requirements = TextInput(label="📋 Requirements", placeholder="Role ID or level requirement (optional)", required=False, max_length=100)
 
             def __init__(self, guild):
                 super().__init__()
@@ -1250,20 +1616,19 @@ class AnionBot(commands.Bot):
                     await interaction.followup.send("❌ Winners must be 1-10!", ephemeral=True)
                     return
 
-                # Get ping role via select
                 roles = [r for r in self.guild.roles if r.name != '@everyone']
                 if not roles:
                     await interaction.followup.send("❌ No roles found!", ephemeral=True)
                     return
 
-                # Create role select
                 class RoleSelectView(View):
-                    def __init__(self, prize, winners, seconds, description, interaction, guild):
+                    def __init__(self, prize, winners, seconds, description, requirements, interaction, guild):
                         super().__init__(timeout=120)
                         self.prize = prize
                         self.winners = winners
                         self.seconds = seconds
                         self.description = description
+                        self.requirements = requirements
                         self.interaction = interaction
                         self.guild = guild
                         self.role = None
@@ -1307,14 +1672,13 @@ class AnionBot(commands.Bot):
 
                         end_time = datetime.now() + timedelta(seconds=self.seconds)
                         
-                        # FIX: Save giveaway FIRST without message_id
                         cursor = db_execute("""INSERT INTO giveaways 
-                            (channel_id, guild_id, prize, winners, ended_at, hosted_by, ping_role_id, image_url, description)
-                            VALUES (?,?,?,?,?,?,?,?,?)""", (
+                            (channel_id, guild_id, prize, winners, ended_at, hosted_by, ping_role_id, image_url, description, requirements)
+                            VALUES (?,?,?,?,?,?,?,?,?,?)""", (
                             str(button_interaction.channel.id), str(self.guild.id),
                             self.prize, self.winners, end_time.isoformat(),
                             str(button_interaction.user.id), str(role.id),
-                            self.image_url, self.description
+                            self.image_url, self.description, self.requirements
                         ))
                         giveaway_id = cursor.lastrowid
 
@@ -1325,30 +1689,30 @@ class AnionBot(commands.Bot):
                         )
                         if self.description:
                             embed.add_field(name="📝 Description", value=self.description, inline=False)
+                        if self.requirements:
+                            embed.add_field(name="📋 Requirements", value=self.requirements, inline=False)
                         if self.image_url:
                             embed.set_image(url=self.image_url)
                         else:
                             embed.set_thumbnail(url=self.guild.me.display_avatar.url)
                         embed.set_footer(text=f"Hosted by {button_interaction.user.display_name}")
 
-                        # Create message with the view
                         view = GiveawayButtonView(giveaway_id=giveaway_id, role_id=str(role.id))
                         message = await button_interaction.channel.send(embed=embed, view=view)
                         
-                        # UPDATE with message_id
                         db_execute("UPDATE giveaways SET message_id=? WHERE id=?", (str(message.id), giveaway_id))
                         await button_interaction.channel.send(f"{role.mention} 🎁 A new giveaway has started!")
 
                         await button_interaction.response.send_message("✅ Giveaway started!", ephemeral=True)
                         logger.info(f"Giveaway started: {self.prize} by {button_interaction.user} in {self.guild.name}")
 
-                # Send role select
                 embed = discord.Embed(
                     title="🎁 Giveaway Setup",
                     description="Select the role to ping and then click 'Start Giveaway'",
                     color=discord.Color.purple()
                 )
-                view = RoleSelectView(self.prize.value, self.winners.value, seconds, self.description.value, interaction, self.guild)
+                view = RoleSelectView(self.prize.value, self.winners.value, seconds, self.description.value, 
+                                      self.requirements.value, interaction, self.guild)
                 await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
         class GiveawayButtonView(View):
@@ -1361,14 +1725,27 @@ class AnionBot(commands.Bot):
             async def join_giveaway(self, interaction: discord.Interaction, button: Button):
                 await interaction.response.defer(ephemeral=True)
 
-                if not self.giveaway_id:
-                    await interaction.followup.send("❌ Giveaway not found!", ephemeral=True)
-                    return
-
                 giveaway = db_fetch_one("SELECT * FROM giveaways WHERE id=? AND ended=0", (self.giveaway_id,))
                 if not giveaway:
                     await interaction.followup.send("❌ This giveaway has ended!", ephemeral=True)
                     return
+
+                # Check requirements
+                if giveaway['requirements']:
+                    req = giveaway['requirements']
+                    if req.isdigit():
+                        # Level requirement
+                        level_data = db_fetch_one("SELECT level FROM levels WHERE user_id=? AND guild_id=?", 
+                                                   (str(interaction.user.id), str(interaction.guild.id)))
+                        if not level_data or level_data['level'] < int(req):
+                            await interaction.followup.send(f"❌ You need to be level {req} to enter!", ephemeral=True)
+                            return
+                    else:
+                        # Role requirement
+                        role = interaction.guild.get_role(int(req))
+                        if role and role not in interaction.user.roles:
+                            await interaction.followup.send(f"❌ You need the {role.mention} role to enter!", ephemeral=True)
+                            return
 
                 db_execute("INSERT OR IGNORE INTO giveaway_participants (giveaway_id, user_id) VALUES (?,?)", 
                            (self.giveaway_id, str(interaction.user.id)))
@@ -1379,23 +1756,13 @@ class AnionBot(commands.Bot):
             @discord.ui.button(label="❌ Leave Giveaway", style=discord.ButtonStyle.danger, custom_id="leave_giveaway", row=0)
             async def leave_giveaway(self, interaction: discord.Interaction, button: Button):
                 await interaction.response.defer(ephemeral=True)
-
-                if not self.giveaway_id:
-                    await interaction.followup.send("❌ Giveaway not found!", ephemeral=True)
-                    return
-
                 db_execute("DELETE FROM giveaway_participants WHERE giveaway_id=? AND user_id=?", 
                            (self.giveaway_id, str(interaction.user.id)))
                 await interaction.followup.send("✅ You've left the giveaway.", ephemeral=True)
 
-            @discord.ui.button(label="👥 See Participants", style=discord.ButtonStyle.secondary, custom_id="see_participants", row=0)
+            @discord.ui.button(label="👥 Participants", style=discord.ButtonStyle.secondary, custom_id="see_participants", row=0)
             async def see_participants(self, interaction: discord.Interaction, button: Button):
                 await interaction.response.defer(ephemeral=True)
-
-                if not self.giveaway_id:
-                    await interaction.followup.send("❌ Giveaway not found!", ephemeral=True)
-                    return
-
                 participants = db_fetch_all("SELECT user_id FROM giveaway_participants WHERE giveaway_id=?", (self.giveaway_id,))
                 if not participants:
                     await interaction.followup.send("❌ No participants yet!", ephemeral=True)
@@ -1413,10 +1780,6 @@ class AnionBot(commands.Bot):
             async def end_giveaway(self, interaction: discord.Interaction, button: Button):
                 await interaction.response.defer()
 
-                if not self.giveaway_id:
-                    await interaction.followup.send("❌ Giveaway not found!", ephemeral=True)
-                    return
-
                 if not interaction.user.guild_permissions.administrator:
                     await interaction.followup.send("❌ You need Administrator permission!", ephemeral=True)
                     return
@@ -1426,7 +1789,6 @@ class AnionBot(commands.Bot):
                     await interaction.followup.send("❌ Giveaway not found!", ephemeral=True)
                     return
 
-                # Pick winners
                 participants = db_fetch_all("SELECT user_id FROM giveaway_participants WHERE giveaway_id=?", (self.giveaway_id,))
                 users = []
                 for p in participants:
@@ -1445,17 +1807,14 @@ class AnionBot(commands.Bot):
                     embed.set_image(url=giveaway['image_url'])
                 embed.set_footer(text=f"Hosted by <@{giveaway['hosted_by']}>")
 
-                # Update message
                 message = await interaction.channel.fetch_message(int(giveaway['message_id']))
                 await message.edit(embed=embed, view=None)
 
-                # Ping role
                 if giveaway['ping_role_id']:
                     role = interaction.guild.get_role(int(giveaway['ping_role_id']))
                     if role:
                         await interaction.channel.send(f"{role.mention} 🎉 Giveaway ended!")
 
-                # DM winners
                 for winner in winners:
                     try:
                         await winner.send(f"🎉 You won **{giveaway['prize']}** in {interaction.guild.name}!")
@@ -1466,19 +1825,15 @@ class AnionBot(commands.Bot):
                 await interaction.followup.send("✅ Giveaway ended!", ephemeral=True)
                 logger.info(f"Giveaway ended: {giveaway['prize']} by {interaction.user} in {interaction.guild.name}")
 
-            @discord.ui.button(label="✏️ Edit Giveaway", style=discord.ButtonStyle.primary, custom_id="edit_giveaway", row=1)
-            async def edit_giveaway(self, interaction: discord.Interaction, button: Button):
-                await interaction.response.send_message("✏️ Edit feature coming soon!", ephemeral=True)
-
-        @self.tree.command(name="giveaway_host", description="🎁 Host a giveaway with full GUI")
+        @self.tree.command(name="giveaway", description="🎁 Host a giveaway with full GUI")
         @app_commands.default_permissions(administrator=True)
         @app_commands.checks.cooldown(1, 30.0)
         @log_command
-        async def giveaway_host(interaction: discord.Interaction):
+        async def giveaway(interaction: discord.Interaction):
             modal = GiveawayModal(interaction.guild)
             await interaction.response.send_modal(modal)
 
-        @self.tree.command(name="giveaway_end", description="🎁 End giveaway early (Admin)")
+        @self.tree.command(name="giveaway_end", description="🎁 End giveaway early")
         @app_commands.default_permissions(administrator=True)
         @app_commands.checks.cooldown(1, 10.0)
         @app_commands.describe(message_id="Message ID of the giveaway")
@@ -1502,7 +1857,7 @@ class AnionBot(commands.Bot):
                 logger.error(f"Giveaway end error: {e}")
                 await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
-        @self.tree.command(name="giveaway_reroll", description="🎁 Reroll a giveaway (Admin)")
+        @self.tree.command(name="giveaway_reroll", description="🎁 Reroll a giveaway")
         @app_commands.default_permissions(administrator=True)
         @app_commands.checks.cooldown(1, 10.0)
         @app_commands.describe(message_id="Message ID of the giveaway")
@@ -1536,19 +1891,8 @@ class AnionBot(commands.Bot):
                 logger.error(f"Giveaway reroll error: {e}")
                 await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
-        @self.tree.command(name="setgiveawayrole", description="⚙️ Set giveaway ping role (Admin)")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 5.0)
-        @app_commands.describe(role="Role to ping for giveaways")
-        @log_command
-        async def setgiveawayrole(interaction: discord.Interaction, role: discord.Role):
-            db_execute("INSERT OR REPLACE INTO guild_settings (guild_id, giveaway_ping_role_id) VALUES (?,?)",
-                       (str(interaction.guild.id), str(role.id)))
-            embed = discord.Embed(title="✅ Giveaway Ping Role Set", description=f"Set to {role.mention}", color=discord.Color.green())
-            await interaction.response.send_message(embed=embed)
-
         # ═════════════════════════════════════════════════════════════════════
-        # 3. TICKET COMMANDS - FIXED
+        # SECTION 3: TICKET SYSTEM - ULTIMATE
         # ═════════════════════════════════════════════════════════════════════
 
         class TicketTypeView(View):
@@ -1637,7 +1981,7 @@ class AnionBot(commands.Bot):
             
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+                user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, embed_links=True),
                 guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)
             }
             
@@ -1645,7 +1989,7 @@ class AnionBot(commands.Bot):
             if settings and settings['ticket_support_role_id']:
                 role = guild.get_role(int(settings['ticket_support_role_id']))
                 if role:
-                    overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+                    overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True)
             
             ticket_id = f"{guild.id}-{user.id}-{random.randint(1000,9999)}"
             ch = await guild.create_text_channel(f"ticket-{user.display_name}"[:95], category=category, overwrites=overwrites, topic=f"Ticket {ticket_id} • {category_name}")
@@ -1664,20 +2008,20 @@ class AnionBot(commands.Bot):
                 super().__init__(timeout=None)
                 self.ticket_id = ticket_id
             
-            @discord.ui.button(label="Close Ticket", emoji="🔒", style=discord.ButtonStyle.secondary)
+            @discord.ui.button(label="🔒 Close", style=discord.ButtonStyle.secondary, emoji="🔒")
             async def close(self, i, b):
                 db_execute("UPDATE tickets SET status='closed', closed_at=? WHERE ticket_id=?", 
                            (datetime.now().isoformat(), self.ticket_id))
                 await i.response.send_message("🔒 Ticket closed. Use Delete when finished.", ephemeral=True)
             
-            @discord.ui.button(label="Delete Ticket", emoji="🗑️", style=discord.ButtonStyle.danger)
+            @discord.ui.button(label="🗑️ Delete", style=discord.ButtonStyle.danger, emoji="🗑️")
             async def delete(self, i, b):
                 await i.response.send_message("Deleting ticket…", ephemeral=True)
                 await asyncio.sleep(2)
                 await i.channel.delete()
                 db_execute("DELETE FROM tickets WHERE ticket_id=?", (self.ticket_id,))
             
-            @discord.ui.button(label="Transcript", emoji="📄", style=discord.ButtonStyle.primary)
+            @discord.ui.button(label="📄 Transcript", style=discord.ButtonStyle.primary, emoji="📄")
             async def transcript(self, i, b):
                 await i.response.defer(ephemeral=True)
                 lines = []
@@ -1690,17 +2034,21 @@ class AnionBot(commands.Bot):
                 
                 await i.followup.send(file=discord.File(io.BytesIO('\n'.join(lines).encode()), filename=f"transcript-{self.ticket_id}.txt"), ephemeral=True)
             
-            @discord.ui.button(label="Add User", emoji="➕", style=discord.ButtonStyle.success)
+            @discord.ui.button(label="➕ Add User", style=discord.ButtonStyle.success, emoji="➕")
             async def add(self, i, b):
                 await i.response.send_modal(TicketMemberModal(True))
             
-            @discord.ui.button(label="Remove User", emoji="➖", style=discord.ButtonStyle.secondary)
+            @discord.ui.button(label="➖ Remove User", style=discord.ButtonStyle.secondary, emoji="➖")
             async def remove(self, i, b):
                 await i.response.send_modal(TicketMemberModal(False))
             
-            @discord.ui.button(label="Special Note", emoji="📝", style=discord.ButtonStyle.primary)
+            @discord.ui.button(label="📝 Note", style=discord.ButtonStyle.primary, emoji="📝")
             async def note(self, i, b):
                 await i.response.send_modal(SpecialNoteModal(self.ticket_id))
+            
+            @discord.ui.button(label="⭐ Rate", style=discord.ButtonStyle.success, emoji="⭐")
+            async def rate(self, i, b):
+                await i.response.send_modal(TicketRatingModal(self.ticket_id))
             
         class TicketMemberModal(Modal, title="Ticket Member"):
             member_id = TextInput(label="Member ID", placeholder="Discord user ID")
@@ -1726,11 +2074,27 @@ class AnionBot(commands.Bot):
                 self.ticket_id = ticket_id
             
             async def on_submit(self, i):
-                t = db_fetch_one("SELECT user_id,guild_id FROM tickets WHERE ticket_id=?", (self.ticket_id,))
-                if t:
-                    firebase_save_special_note(t['user_id'], t['guild_id'], self.note.value)
-                    db_execute("UPDATE tickets SET special_note=? WHERE ticket_id=?", (self.note.value, self.ticket_id))
+                db_execute("UPDATE tickets SET special_note=? WHERE ticket_id=?", (self.note.value, self.ticket_id))
                 await i.response.send_message("✅ Special note saved.", ephemeral=True)
+
+        class TicketRatingModal(Modal, title="Rate Your Support"):
+            rating = TextInput(label="Rating (1-5)", placeholder="1-5 stars", required=True, max_length=1)
+            feedback = TextInput(label="Feedback", placeholder="How was your experience?", required=False, max_length=500, style=discord.TextStyle.paragraph)
+            
+            def __init__(self, ticket_id):
+                super().__init__()
+                self.ticket_id = ticket_id
+            
+            async def on_submit(self, i):
+                try:
+                    rating = int(self.rating.value)
+                    if rating < 1 or rating > 5:
+                        raise ValueError
+                    db_execute("UPDATE tickets SET rating=?, feedback=? WHERE ticket_id=?", 
+                               (rating, self.feedback.value, self.ticket_id))
+                    await i.response.send_message(f"⭐ Thank you for your {rating}-star rating!", ephemeral=True)
+                except:
+                    await i.response.send_message("❌ Please enter a rating between 1 and 5!", ephemeral=True)
         
         @self.tree.command(name="setup_ticket", description="🎫 Setup a modern ticket panel")
         @app_commands.default_permissions(administrator=True)
@@ -1756,286 +2120,97 @@ class AnionBot(commands.Bot):
             await interaction.response.send_message(f"✅ Support role set to {role.mention}", ephemeral=True)
 
         # ═════════════════════════════════════════════════════════════════════
-        # 4. WELCOME COMMANDS - WITH IMAGE + TEXT OVERLAY
+        # SECTION 4: LEVELING SYSTEM - ULTIMATE
         # ═════════════════════════════════════════════════════════════════════
 
-        class WelcomeSetupModal(Modal, title="👋 Welcome Setup"):
-            message = TextInput(label="📝 Welcome Message", placeholder="Welcome {user} to {server}!", required=True, max_length=500)
-            image_url = TextInput(label="🖼️ Image URL", placeholder="https://example.com/image.png", required=False, max_length=200)
-
-            async def on_submit(self, interaction: discord.Interaction):
-                db_execute("""
-                    INSERT OR REPLACE INTO guild_settings (guild_id, welcome_message, welcome_image)
-                    VALUES (?,?,?)
-                """, (str(interaction.guild.id), self.message.value, self.image_url.value or None))
+        @self.tree.command(name="rank", description="📊 Check your rank")
+        @app_commands.checks.cooldown(1, 3.0)
+        @log_command
+        async def rank(interaction: discord.Interaction, member: discord.Member = None):
+            target = member or interaction.user
+            
+            data = db_fetch_one("SELECT xp, level, messages, voice_minutes FROM levels WHERE user_id=? AND guild_id=?", 
+                                (str(target.id), str(interaction.guild.id)))
+            
+            if not data:
                 embed = discord.Embed(
-                    title="👋 Welcome Setup Complete",
-                    description=f"Message: {self.message.value[:50]}...",
-                    color=discord.Color.green()
-                )
-                if self.image_url.value:
-                    embed.set_image(url=self.image_url.value)
-                await interaction.response.send_message(embed=embed)
-
-        class GoodbyeSetupModal(Modal, title="👋 Goodbye Setup"):
-            message = TextInput(label="📝 Goodbye Message", placeholder="Goodbye {user}!", required=True, max_length=500)
-            image_url = TextInput(label="🖼️ Image URL", placeholder="https://example.com/image.png", required=False, max_length=200)
-
-            async def on_submit(self, interaction: discord.Interaction):
-                db_execute("""
-                    INSERT OR REPLACE INTO guild_settings (guild_id, goodbye_message, goodbye_image)
-                    VALUES (?,?,?)
-                """, (str(interaction.guild.id), self.message.value, self.image_url.value or None))
-                embed = discord.Embed(
-                    title="👋 Goodbye Setup Complete",
-                    description=f"Message: {self.message.value[:50]}...",
-                    color=discord.Color.orange()
-                )
-                if self.image_url.value:
-                    embed.set_image(url=self.image_url.value)
-                await interaction.response.send_message(embed=embed)
-
-        @self.tree.command(name="setup_welcome", description="👋 Setup welcome message with image (Admin)")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 30.0)
-        @log_command
-        async def setup_welcome(interaction: discord.Interaction):
-            modal = WelcomeSetupModal()
-            await interaction.response.send_modal(modal)
-
-        @self.tree.command(name="setup_goodbye", description="👋 Setup goodbye message with image (Admin)")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 30.0)
-        @log_command
-        async def setup_goodbye(interaction: discord.Interaction):
-            modal = GoodbyeSetupModal()
-            await interaction.response.send_modal(modal)
-
-        @self.tree.command(name="setwelcomechannel", description="👋 Set welcome channel (Admin)")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 5.0)
-        @app_commands.describe(channel="Welcome channel")
-        @log_command
-        async def setwelcomechannel(interaction: discord.Interaction, channel: discord.TextChannel):
-            db_execute("INSERT OR REPLACE INTO guild_settings (guild_id, welcome_channel_id) VALUES (?,?)",
-                       (str(interaction.guild.id), str(channel.id)))
-            embed = discord.Embed(title="👋 Welcome Channel Set", description=f"Set to {channel.mention}", color=discord.Color.green())
-            await interaction.response.send_message(embed=embed)
-
-        @self.tree.command(name="setgoodbyechannel", description="👋 Set goodbye channel (Admin)")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 5.0)
-        @app_commands.describe(channel="Goodbye channel")
-        @log_command
-        async def setgoodbyechannel(interaction: discord.Interaction, channel: discord.TextChannel):
-            db_execute("INSERT OR REPLACE INTO guild_settings (guild_id, goodbye_channel_id) VALUES (?,?)",
-                       (str(interaction.guild.id), str(channel.id)))
-            embed = discord.Embed(title="👋 Goodbye Channel Set", description=f"Set to {channel.mention}", color=discord.Color.green())
-            await interaction.response.send_message(embed=embed)
-
-        # ═════════════════════════════════════════════════════════════════════
-        # 5. USER PASSWORD SYSTEM
-        # ═════════════════════════════════════════════════════════════════════
-
-        async def generate_user_password(member, guild_id):
-            """Generate unique username and password for user"""
-            username = f"user_{member.id}_{random.randint(100,999)}"
-            password = secrets.token_urlsafe(12)
-
-            db_execute("""
-                INSERT OR REPLACE INTO user_passwords (user_id, guild_id, username, password, role_level)
-                VALUES (?,?,?,?,?)
-            """, (str(member.id), str(guild_id), username, password, 'user'))
-
-            # Save to Firebase
-            firebase_save_password(str(member.id), str(guild_id), {
-                'username': username,
-                'password': password,
-                'role_level': 'user',
-                'user_id': str(member.id),
-                'updated_at': datetime.now().isoformat()
-            })
-
-            # DM user
-            try:
-                embed = discord.Embed(
-                    title="🔐 Your Account Credentials",
-                    description=f"**Username:** `{username}`\n**Password:** `{password}`",
+                    title=f"📊 {target.display_name}'s Rank",
+                    description="No data yet! Start chatting to earn XP!",
                     color=discord.Color.blue()
                 )
-                embed.add_field(name="📌 Note", value="Keep these credentials safe! You can use them to access server resources.", inline=False)
-                await member.send(embed=embed)
-            except:
-                pass
-
-            return username, password
-
-        @self.tree.command(name="update_role_level", description="⚙️ Update user role level (Admin)")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 5.0)
-        @app_commands.describe(user="User to update", level="Role level (user, moderator, admin)")
-        @log_command
-        async def update_role_level(interaction: discord.Interaction, user: discord.Member, level: str):
-            if level not in ['user', 'moderator', 'admin']:
-                await interaction.response.send_message("❌ Invalid level! Use: user, moderator, admin", ephemeral=True)
+                embed.set_thumbnail(url=target.display_avatar.url)
+                await interaction.response.send_message(embed=embed)
                 return
-
-            db_execute("UPDATE user_passwords SET role_level=?, updated_at=? WHERE user_id=? AND guild_id=?",
-                       (level, datetime.now().isoformat(), str(user.id), str(interaction.guild.id)))
-
-            firebase_save_password(str(user.id), str(interaction.guild.id), {
-                'username': f"user_{user.id}",
-                'password': '****',
-                'role_level': level,
-                'user_id': str(user.id),
-                'updated_at': datetime.now().isoformat()
-            })
-
+            
+            # Get rank position
+            c.execute("SELECT COUNT(*) FROM levels WHERE guild_id=? AND level > ? AND xp > ?", 
+                      (str(interaction.guild.id), data['level'], data['xp']))
+            rank_pos = c.fetchone()[0] + 1
+            
             embed = discord.Embed(
-                title="✅ Role Level Updated",
-                description=f"{user.mention} is now a **{level}**!",
-                color=discord.Color.green()
+                title=f"📊 {target.display_name}'s Rank",
+                color=target.color or discord.Color.blue()
             )
+            embed.set_thumbnail(url=target.display_avatar.url)
+            embed.add_field(name="Level", value=f"**{data['level']}**", inline=True)
+            embed.add_field(name="XP", value=f"**{data['xp']}**", inline=True)
+            embed.add_field(name="Rank", value=f"**#{rank_pos}**", inline=True)
+            embed.add_field(name="Messages", value=f"**{data['messages']}**", inline=True)
+            embed.add_field(name="Voice Minutes", value=f"**{data['voice_minutes']}**", inline=True)
+            
+            # XP progress bar
+            xp_needed = 100 * (data['level'] + 1) ** 2
+            progress = int((data['xp'] / xp_needed) * 20)
+            bar = "█" * progress + "░" * (20 - progress)
+            embed.add_field(name="Progress", value=f"`{bar}` {data['xp']}/{xp_needed} XP", inline=False)
+            
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="show_passwords", description="🔑 Show all user passwords (Admin)")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 10.0)
+        @self.tree.command(name="leaderboard", description="🏆 View the server leaderboard")
+        @app_commands.checks.cooldown(1, 5.0)
         @log_command
-        async def show_passwords(interaction: discord.Interaction):
-            passwords = db_fetch_all("SELECT * FROM user_passwords WHERE guild_id=?", (str(interaction.guild.id),))
-            if not passwords:
-                await interaction.response.send_message("❌ No passwords found!", ephemeral=True)
+        async def leaderboard(interaction: discord.Interaction):
+            c.execute("SELECT user_id, level, xp FROM levels WHERE guild_id=? ORDER BY level DESC, xp DESC LIMIT 10", 
+                      (str(interaction.guild.id),))
+            results = c.fetchall()
+            
+            if not results:
+                await interaction.response.send_message("No data yet! Start chatting to earn XP!", ephemeral=True)
                 return
-
+            
             embed = discord.Embed(
-                title="🔑 User Passwords",
-                color=discord.Color.blue()
+                title="🏆 Server Leaderboard",
+                color=discord.Color.gold()
             )
-            for p in passwords[:15]:
+            
+            for i, (user_id, level, xp) in enumerate(results, 1):
+                user = interaction.guild.get_member(int(user_id))
+                name = user.display_name if user else f"Unknown User {user_id[:6]}"
                 embed.add_field(
-                    name=p['username'],
-                    value=f"User: <@{p['user_id']}>\nRole: {p['role_level']}",
+                    name=f"#{i} {name}",
+                    value=f"Level {level} | {xp} XP",
                     inline=False
                 )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+            await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="reset_password", description="🔄 Reset user password (Admin)")
+        @self.tree.command(name="setlevelrole", description="⚙️ Set a role reward for reaching a level")
         @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 10.0)
-        @app_commands.describe(user="User to reset password for")
+        @app_commands.checks.cooldown(1, 5.0)
+        @app_commands.describe(level="Level required", role="Role to give")
         @log_command
-        async def reset_password(interaction: discord.Interaction, user: discord.Member):
-            username = f"user_{user.id}_{random.randint(100,999)}"
-            password = secrets.token_urlsafe(12)
-            
-            db_execute("UPDATE user_passwords SET username=?, password=?, updated_at=? WHERE user_id=? AND guild_id=?",
-                       (username, password, datetime.now().isoformat(), str(user.id), str(interaction.guild.id)))
-            
-            firebase_save_password(str(user.id), str(interaction.guild.id), {
-                'username': username,
-                'password': password,
-                'role_level': 'user',
-                'user_id': str(user.id),
-                'updated_at': datetime.now().isoformat()
-            })
-            
-            try:
-                embed = discord.Embed(
-                    title="🔄 Password Reset",
-                    description=f"**Username:** `{username}`\n**Password:** `{password}`",
-                    color=discord.Color.blue()
-                )
-                await user.send(embed=embed)
-            except:
-                pass
-            
+        async def setlevelrole(interaction: discord.Interaction, level: int, role: discord.Role):
+            db_execute("INSERT OR REPLACE INTO level_roles (guild_id, level, role_id) VALUES (?,?,?)",
+                       (str(interaction.guild.id), level, str(role.id)))
             embed = discord.Embed(
-                title="✅ Password Reset",
-                description=f"New credentials sent to {user.mention}",
+                title="✅ Level Role Set",
+                description=f"Level {level} → {role.mention}",
                 color=discord.Color.green()
             )
             await interaction.response.send_message(embed=embed)
 
         # ═════════════════════════════════════════════════════════════════════
-        # 6. SETUP SERVER - FULL GUI
-        # ═════════════════════════════════════════════════════════════════════
-
-        class SetupServerView(View):
-            def __init__(self):
-                super().__init__(timeout=300)
-                self.values = {}
-                self.add_item(ChannelSelect(channel_types=[discord.ChannelType.text], placeholder="Select log channel", custom_id="setup_log"))
-                self.add_item(ChannelSelect(channel_types=[discord.ChannelType.text], placeholder="Select transcript channel", custom_id="setup_transcript"))
-                self.add_item(RoleSelect(placeholder="Select verified role", custom_id="setup_verified"))
-                self.add_item(RoleSelect(placeholder="Select unverified role", custom_id="setup_unverified"))
-                
-                for child in self.children:
-                    async def cb(interaction, c=child):
-                        self.values[c.custom_id] = c.values[0].id if c.values else None
-                        await interaction.response.defer()
-                    child.callback = cb
-            
-            @discord.ui.button(label="Save Configuration", style=discord.ButtonStyle.success)
-            async def save(self, i, b):
-                db_execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (str(i.guild.id),))
-                mapping = {
-                    'setup_log': 'log_channel_id',
-                    'setup_transcript': 'transcript_channel_id',
-                    'setup_verified': 'verified_role_id',
-                    'setup_unverified': 'unverified_role_id'
-                }
-                for k, col in mapping.items():
-                    if k in self.values and self.values[k]:
-                        db_execute(f"UPDATE guild_settings SET {col}=? WHERE guild_id=?", (str(self.values[k]), str(i.guild.id)))
-                
-                await i.response.send_message("✅ Server configuration saved. You can run `/server_status` to review it.", ephemeral=True)
-
-        @self.tree.command(name="setup_server", description="⚙️ Configure your server")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 60.0)
-        @log_command
-        async def setup_server(interaction):
-            await interaction.response.send_message("Configure channels and roles, then press **Save Configuration**.", view=SetupServerView(), ephemeral=True)
-        
-        @self.tree.command(name="server_status", description="📊 View server configuration status")
-        @app_commands.checks.cooldown(1, 5.0)
-        @log_command
-        async def server_status(interaction):
-            settings = db_fetch_one("SELECT * FROM guild_settings WHERE guild_id=?", (str(interaction.guild.id),))
-            e = discord.Embed(title=f"📊 {interaction.guild.name} • Configuration", color=discord.Color.blurple())
-            
-            if not settings:
-                e.description = "No settings configured yet. Run `/setup_server`."
-                return await interaction.response.send_message(embed=e, ephemeral=True)
-            
-            fields = [
-                ('Verified Role', 'verified_role_id'),
-                ('Unverified Role', 'unverified_role_id'),
-                ('Log Channel', 'log_channel_id'),
-                ('Transcript Channel', 'transcript_channel_id'),
-                ('Welcome Channel', 'welcome_channel_id'),
-                ('Goodbye Channel', 'goodbye_channel_id')
-            ]
-            
-            for label, key in fields:
-                v = settings[key]
-                if v:
-                    if 'Role' in label:
-                        e.add_field(name=label, value=f"✅ <@&{v}>", inline=True)
-                    else:
-                        e.add_field(name=label, value=f"✅ <#{v}>", inline=True)
-                else:
-                    e.add_field(name=label, value='❌ Not configured', inline=True)
-            
-            e.add_field(name='Anti-Nuke', value='🟢 Enabled' if settings['anti_nuke'] else '⚪ Disabled')
-            e.add_field(name='Raid Protection', value='🟢 Enabled' if settings['raid_protection'] else '⚪ Disabled')
-            e.add_field(name='Auto-Mod', value='🟢 Enabled' if settings['automod_enabled'] else '⚪ Disabled')
-            
-            await interaction.response.send_message(embed=e, ephemeral=True)
-
-        # ═════════════════════════════════════════════════════════════════════
-        # 7. MODERATION - FULL GUI WITH MEMBER SELECT
+        # SECTION 5: MODERATION SYSTEM - ULTIMATE
         # ═════════════════════════════════════════════════════════════════════
 
         class ModReasonModal(Modal, title="Moderation Reason"):
@@ -2066,6 +2241,8 @@ class AnionBot(commands.Bot):
                         await member.kick(reason=reason)
                     elif self.action == 'ban':
                         await member.ban(reason=reason)
+                        db_execute("INSERT OR REPLACE INTO bans (user_id, guild_id, reason, moderator_id) VALUES (?,?,?,?)",
+                                   (str(member.id), str(interaction.guild.id), reason, str(interaction.user.id)))
                     elif self.action == 'mute':
                         muted = discord.utils.get(interaction.guild.roles, name="Muted")
                         if not muted:
@@ -2076,8 +2253,9 @@ class AnionBot(commands.Bot):
                                 except:
                                     pass
                         await member.add_roles(muted)
-                        db_execute("INSERT OR REPLACE INTO muted (user_id, guild_id, reason, unmute_at) VALUES (?,?,?,?)",
-                                   (str(member.id), str(interaction.guild.id), reason, (datetime.now() + timedelta(hours=24)).isoformat()))
+                        db_execute("INSERT OR REPLACE INTO muted (user_id, guild_id, reason, unmute_at, moderator_id) VALUES (?,?,?,?,?)",
+                                   (str(member.id), str(interaction.guild.id), reason, 
+                                    (datetime.now() + timedelta(hours=24)).isoformat(), str(interaction.user.id)))
                     elif self.action == 'unmute':
                         muted = discord.utils.get(interaction.guild.roles, name="Muted")
                         if muted:
@@ -2092,6 +2270,10 @@ class AnionBot(commands.Bot):
                     elif self.action == 'deafen':
                         if member.voice:
                             await member.edit(deafen=True)
+                    
+                    # Log moderation action
+                    db_execute("INSERT INTO mod_logs (guild_id, user_id, moderator_id, action, reason) VALUES (?,?,?,?,?)",
+                               (str(interaction.guild.id), str(member.id), str(interaction.user.id), self.action, reason))
                     
                     await interaction.followup.send(f"✅ {self.action.title()} completed for {member.mention}.", ephemeral=True)
                     
@@ -2118,7 +2300,6 @@ class AnionBot(commands.Bot):
                 self.selected_action = None
                 self.selected_member = None
                 
-                # Action select
                 action_select = Select(placeholder="Select moderation action...", min_values=1, max_values=1)
                 actions = [
                     ("ban", "🔨 Ban"),
@@ -2140,11 +2321,9 @@ class AnionBot(commands.Bot):
                 self.selected_action = interaction.data['values'][0]
                 
                 if self.selected_action in ['lock', 'unlock']:
-                    # No member needed for channel actions
                     await interaction.response.send_modal(ModReasonModal(self.selected_action, None))
                     return
                 
-                # Create member select
                 member_select = Select(placeholder="Select member...", min_values=1, max_values=1)
                 members = [m for m in self.guild.members if not m.bot][:25]
                 for member in members:
@@ -2154,7 +2333,6 @@ class AnionBot(commands.Bot):
                     )
                 member_select.callback = self.member_callback
                 
-                # Replace the action select with member select
                 self.clear_items()
                 self.add_item(member_select)
                 await interaction.response.edit_message(view=self)
@@ -2163,7 +2341,7 @@ class AnionBot(commands.Bot):
                 self.selected_member = interaction.data['values'][0]
                 await interaction.response.send_modal(ModReasonModal(self.selected_action, self.selected_member))
 
-        @self.tree.command(name="mod", description="🛡️ Open moderation panel (Admin)")
+        @self.tree.command(name="mod", description="🛡️ Open moderation panel")
         @app_commands.default_permissions(administrator=True)
         @app_commands.checks.cooldown(1, 10.0)
         @log_command
@@ -2177,7 +2355,7 @@ class AnionBot(commands.Bot):
             embed.set_footer(text="Admin-only moderation tools")
             await interaction.response.send_message(embed=embed, view=view)
 
-        # ─── MODERATION COMMANDS ──────────────────────────────────────────────
+        # ─── MODERATION COMMANDS ──────────────────────────────────────────
 
         @self.tree.command(name="ban", description="🔨 Ban a member")
         @app_commands.default_permissions(ban_members=True)
@@ -2186,6 +2364,8 @@ class AnionBot(commands.Bot):
         @log_command
         async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
             await member.ban(reason=reason)
+            db_execute("INSERT OR REPLACE INTO bans (user_id, guild_id, reason, moderator_id) VALUES (?,?,?,?)",
+                       (str(member.id), str(interaction.guild.id), reason, str(interaction.user.id)))
             embed = discord.Embed(
                 title="🔨 Member Banned",
                 description=f"{member.mention} has been banned.",
@@ -2204,6 +2384,7 @@ class AnionBot(commands.Bot):
             try:
                 user = await interaction.guild.fetch_user(int(user_id))
                 await interaction.guild.unban(user)
+                db_execute("DELETE FROM bans WHERE user_id=? AND guild_id=?", (user_id, str(interaction.guild.id)))
                 embed = discord.Embed(
                     title="🔓 User Unbanned",
                     description=f"{user.mention} has been unbanned.",
@@ -2220,6 +2401,8 @@ class AnionBot(commands.Bot):
         @log_command
         async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
             await member.kick(reason=reason)
+            db_execute("INSERT INTO mod_logs (guild_id, user_id, moderator_id, action, reason) VALUES (?,?,?,?,?)",
+                       (str(interaction.guild.id), str(member.id), str(interaction.user.id), 'kick', reason))
             embed = discord.Embed(
                 title="👢 Member Kicked",
                 description=f"{member.mention} has been kicked.",
@@ -2244,8 +2427,8 @@ class AnionBot(commands.Bot):
                         pass
             await member.add_roles(muted)
             unmute_time = datetime.now() + timedelta(hours=24)
-            db_execute("INSERT OR REPLACE INTO muted (user_id, guild_id, reason, unmute_at) VALUES (?,?,?,?)",
-                       (str(member.id), str(interaction.guild.id), reason, unmute_time.isoformat()))
+            db_execute("INSERT OR REPLACE INTO muted (user_id, guild_id, reason, unmute_at, moderator_id) VALUES (?,?,?,?,?)",
+                       (str(member.id), str(interaction.guild.id), reason, unmute_time.isoformat(), str(interaction.user.id)))
             embed = discord.Embed(
                 title="🔇 Member Muted",
                 description=f"{member.mention} muted for 24 hours.",
@@ -2285,6 +2468,39 @@ class AnionBot(commands.Bot):
             embed.add_field(name="Warnings", value=f"{len(warnings)}/3", inline=True)
             await interaction.response.send_message(embed=embed)
 
+        @self.tree.command(name="warnings", description="⚠️ View warnings for a member")
+        @app_commands.default_permissions(manage_messages=True)
+        @app_commands.checks.cooldown(1, 5.0)
+        @app_commands.describe(member="Member to check")
+        @log_command
+        async def warnings(interaction: discord.Interaction, member: discord.Member):
+            warnings = db_fetch_all("SELECT * FROM warnings WHERE user_id=? AND guild_id=?", 
+                                    (str(member.id), str(interaction.guild.id)))
+            
+            if not warnings:
+                embed = discord.Embed(
+                    title=f"⚠️ {member.display_name}'s Warnings",
+                    description="No warnings found.",
+                    color=discord.Color.green()
+                )
+                await interaction.response.send_message(embed=embed)
+                return
+            
+            embed = discord.Embed(
+                title=f"⚠️ {member.display_name}'s Warnings",
+                color=discord.Color.orange()
+            )
+            for w in warnings[:10]:
+                mod = interaction.guild.get_member(int(w['moderator_id']))
+                mod_name = mod.display_name if mod else "Unknown"
+                embed.add_field(
+                    name=f"Warning #{w['id']}",
+                    value=f"**Reason:** {w['reason']}\n**Moderator:** {mod_name}\n**Date:** {w['warned_at'][:16]}",
+                    inline=False
+                )
+            
+            await interaction.response.send_message(embed=embed)
+
         @self.tree.command(name="unwarn", description="✅ Remove a warning")
         @app_commands.default_permissions(manage_messages=True)
         @app_commands.checks.cooldown(1, 5.0)
@@ -2293,59 +2509,6 @@ class AnionBot(commands.Bot):
         async def unwarn(interaction: discord.Interaction, warning_id: int):
             db_delete("DELETE FROM warnings WHERE id=?", (warning_id,))
             embed = discord.Embed(title="✅ Warning Removed", description=f"Removed warning #{warning_id}", color=discord.Color.green())
-            await interaction.response.send_message(embed=embed)
-
-        @self.tree.command(name="timeout", description="⏰ Timeout a member")
-        @app_commands.default_permissions(moderate_members=True)
-        @app_commands.checks.cooldown(1, 5.0)
-        @app_commands.describe(member="Member to timeout", duration="Duration (1m, 1h, 1d)", reason="Reason")
-        @log_command
-        async def timeout(interaction: discord.Interaction, member: discord.Member, duration: str, reason: str = "No reason"):
-            duration_map = {'m': 60, 'h': 3600, 'd': 86400}
-            unit = duration[-1].lower()
-            seconds = int(duration[:-1]) * duration_map[unit]
-            await member.timeout(discord.utils.utcnow() + timedelta(seconds=seconds), reason=reason)
-            embed = discord.Embed(
-                title="⏰ Member Timed Out",
-                description=f"{member.mention} timed out for {duration}.",
-                color=discord.Color.orange()
-            )
-            embed.add_field(name="Reason", value=reason, inline=False)
-            await interaction.response.send_message(embed=embed)
-
-        @self.tree.command(name="deafen", description="🔇 Deafen a member")
-        @app_commands.default_permissions(mute_members=True)
-        @app_commands.checks.cooldown(1, 5.0)
-        @app_commands.describe(member="Member to deafen")
-        @log_command
-        async def deafen(interaction: discord.Interaction, member: discord.Member):
-            if member.voice:
-                await member.edit(deafen=True)
-                embed = discord.Embed(title="🔇 Member Deafened", description=f"{member.mention} has been deafened.", color=discord.Color.orange())
-                await interaction.response.send_message(embed=embed)
-            else:
-                await interaction.response.send_message("❌ User is not in voice channel!", ephemeral=True)
-
-        @self.tree.command(name="lock", description="🔒 Lock channel")
-        @app_commands.default_permissions(manage_channels=True)
-        @app_commands.checks.cooldown(1, 5.0)
-        @app_commands.describe(channel="Channel to lock")
-        @log_command
-        async def lock(interaction: discord.Interaction, channel: discord.TextChannel = None):
-            channel = channel or interaction.channel
-            await channel.set_permissions(interaction.guild.default_role, send_messages=False)
-            embed = discord.Embed(title="🔒 Channel Locked", description=f"{channel.mention} has been locked.", color=discord.Color.red())
-            await interaction.response.send_message(embed=embed)
-
-        @self.tree.command(name="unlock", description="🔓 Unlock channel")
-        @app_commands.default_permissions(manage_channels=True)
-        @app_commands.checks.cooldown(1, 5.0)
-        @app_commands.describe(channel="Channel to unlock")
-        @log_command
-        async def unlock(interaction: discord.Interaction, channel: discord.TextChannel = None):
-            channel = channel or interaction.channel
-            await channel.set_permissions(interaction.guild.default_role, send_messages=None)
-            embed = discord.Embed(title="🔓 Channel Unlocked", description=f"{channel.mention} has been unlocked.", color=discord.Color.green())
             await interaction.response.send_message(embed=embed)
 
         @self.tree.command(name="clear", description="🗑️ Clear messages")
@@ -2362,7 +2525,463 @@ class AnionBot(commands.Bot):
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
         # ═════════════════════════════════════════════════════════════════════
-        # 8. OPFUN - DM ALL, EMBED, ANNOUNCEMENT
+        # SECTION 6: AUTO-MOD SYSTEM
+        # ═════════════════════════════════════════════════════════════════════
+
+        @self.tree.command(name="add_badword", description="🚫 Add a bad word")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 5.0)
+        @app_commands.describe(word="Word to add", action="Action to take (warn/mute/delete)")
+        @log_command
+        async def add_badword(interaction: discord.Interaction, word: str, action: str = "warn"):
+            db_execute("INSERT OR REPLACE INTO bad_words (word, guild_id, action) VALUES (?,?,?)",
+                       (word.lower(), str(interaction.guild.id), action))
+            embed = discord.Embed(title="✅ Bad Word Added", description=f"Added `{word}` with action `{action}`", color=discord.Color.green())
+            await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(name="remove_badword", description="🚫 Remove a bad word")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 5.0)
+        @app_commands.describe(word="Word to remove")
+        @log_command
+        async def remove_badword(interaction: discord.Interaction, word: str):
+            db_delete("DELETE FROM bad_words WHERE word=? AND guild_id=?", (word.lower(), str(interaction.guild.id)))
+            embed = discord.Embed(title="✅ Bad Word Removed", description=f"Removed `{word}`", color=discord.Color.green())
+            await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(name="list_badwords", description="🚫 List all bad words")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 5.0)
+        @log_command
+        async def list_badwords(interaction: discord.Interaction):
+            words = db_fetch_all("SELECT word, action FROM bad_words WHERE guild_id=?", (str(interaction.guild.id),))
+            if not words:
+                await interaction.response.send_message("✅ No bad words configured!", ephemeral=True)
+                return
+            word_list = "\n".join([f"• `{w['word']}` → {w['action']}" for w in words])
+            embed = discord.Embed(title="🚫 Bad Words", description=word_list, color=discord.Color.red())
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        # ═════════════════════════════════════════════════════════════════════
+        # SECTION 7: ECONOMY SYSTEM
+        # ═════════════════════════════════════════════════════════════════════
+
+        @self.tree.command(name="balance", description="💰 Check your balance")
+        @app_commands.checks.cooldown(1, 3.0)
+        @log_command
+        async def balance(interaction: discord.Interaction, member: discord.Member = None):
+            target = member or interaction.user
+            data = db_fetch_one("SELECT coins, bank, total_earned, daily_streak FROM economy WHERE user_id=? AND guild_id=?",
+                                (str(target.id), str(interaction.guild.id)))
+            
+            if not data:
+                db_execute("INSERT INTO economy (user_id, guild_id, coins, bank) VALUES (?,?,100,0)",
+                          (str(target.id), str(interaction.guild.id)))
+                data = {'coins': 100, 'bank': 0, 'total_earned': 0, 'daily_streak': 0}
+            
+            embed = discord.Embed(
+                title=f"💰 {target.display_name}'s Balance",
+                color=discord.Color.gold()
+            )
+            embed.set_thumbnail(url=target.display_avatar.url)
+            embed.add_field(name="Wallet", value=f"**{data['coins']}** 🪙", inline=True)
+            embed.add_field(name="Bank", value=f"**{data['bank']}** 🏦", inline=True)
+            embed.add_field(name="Total Earned", value=f"**{data['total_earned']}** 🪙", inline=True)
+            embed.add_field(name="Daily Streak", value=f"**{data['daily_streak']}** 🔥", inline=True)
+            
+            await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(name="daily", description="🎁 Claim your daily bonus")
+        @app_commands.checks.cooldown(1, 5.0)
+        @log_command
+        async def daily(interaction: discord.Interaction):
+            user_id = str(interaction.user.id)
+            guild_id = str(interaction.guild.id)
+            
+            data = db_fetch_one("SELECT daily_streak, last_daily FROM economy WHERE user_id=? AND guild_id=?", (user_id, guild_id))
+            
+            if data and data['last_daily']:
+                last = datetime.fromisoformat(data['last_daily'])
+                if (datetime.now() - last).total_seconds() < 86400:
+                    remaining = 86400 - (datetime.now() - last).total_seconds()
+                    hours = int(remaining // 3600)
+                    minutes = int((remaining % 3600) // 60)
+                    await interaction.response.send_message(f"⏳ You already claimed your daily bonus! Come back in {hours}h {minutes}m.", ephemeral=True)
+                    return
+            
+            streak = data['daily_streak'] + 1 if data else 1
+            bonus = 100 + (streak - 1) * 10  # 100 base + 10 per streak
+            
+            db_execute("""INSERT OR REPLACE INTO economy (user_id, guild_id, coins, bank, total_earned, daily_streak, last_daily) 
+                         VALUES (?,?,COALESCE((SELECT coins FROM economy WHERE user_id=? AND guild_id=?),0)+?, 
+                                COALESCE((SELECT bank FROM economy WHERE user_id=? AND guild_id=?),0),
+                                COALESCE((SELECT total_earned FROM economy WHERE user_id=? AND guild_id=?),0)+?,
+                                ?, ?)""",
+                       (user_id, guild_id, user_id, guild_id, bonus, user_id, guild_id, user_id, guild_id, bonus, streak, datetime.now().isoformat()))
+            
+            embed = discord.Embed(
+                title="🎁 Daily Bonus Claimed!",
+                description=f"You received **{bonus}** coins! 🪙\n\n**Streak:** {streak} days 🔥",
+                color=discord.Color.gold()
+            )
+            await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(name="shop", description="🛒 View the shop")
+        @app_commands.checks.cooldown(1, 5.0)
+        @log_command
+        async def shop(interaction: discord.Interaction):
+            items = db_fetch_all("SELECT * FROM shop_items WHERE guild_id=? OR guild_id='global'", (str(interaction.guild.id),))
+            
+            embed = discord.Embed(
+                title="🛒 Shop",
+                description="Use `/buy <item_id>` to purchase an item!",
+                color=discord.Color.gold()
+            )
+            
+            for item in items:
+                stock = f"Stock: {item['stock']}" if item['stock'] > 0 else "Unlimited"
+                embed.add_field(
+                    name=f"{item['name']} - {item['price']}🪙",
+                    value=f"{item['description']}\n{stock}",
+                    inline=False
+                )
+            
+            await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(name="buy", description="🛒 Buy an item from the shop")
+        @app_commands.checks.cooldown(1, 5.0)
+        @app_commands.describe(item_id="Item ID to buy")
+        @log_command
+        async def buy(interaction: discord.Interaction, item_id: int):
+            item = db_fetch_one("SELECT * FROM shop_items WHERE id=? AND (guild_id=? OR guild_id='global')", 
+                               (item_id, str(interaction.guild.id)))
+            
+            if not item:
+                await interaction.response.send_message("❌ Item not found!", ephemeral=True)
+                return
+            
+            user_id = str(interaction.user.id)
+            guild_id = str(interaction.guild.id)
+            
+            # Check balance
+            balance_data = db_fetch_one("SELECT coins FROM economy WHERE user_id=? AND guild_id=?", (user_id, guild_id))
+            if not balance_data or balance_data['coins'] < item['price']:
+                await interaction.response.send_message(f"❌ You need {item['price']} coins!", ephemeral=True)
+                return
+            
+            # Check stock
+            if item['stock'] > 0:
+                db_execute("UPDATE shop_items SET stock = stock - 1 WHERE id=?", (item_id,))
+            
+            # Deduct coins
+            db_execute("UPDATE economy SET coins = coins - ?, total_spent = total_spent + ? WHERE user_id=? AND guild_id=?",
+                       (item['price'], item['price'], user_id, guild_id))
+            
+            # Add to inventory
+            db_execute("INSERT OR REPLACE INTO inventory (user_id, guild_id, item_id, quantity) VALUES (?,?,?,COALESCE((SELECT quantity FROM inventory WHERE user_id=? AND guild_id=? AND item_id=?),0)+1)",
+                       (user_id, guild_id, item_id, user_id, guild_id, item_id))
+            
+            # Assign role if it's a role item
+            if item['role_id']:
+                role = interaction.guild.get_role(int(item['role_id']))
+                if role:
+                    await interaction.user.add_roles(role)
+            
+            embed = discord.Embed(
+                title="✅ Purchase Successful!",
+                description=f"You bought **{item['name']}** for {item['price']} coins!",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(name="addshopitem", description="🛒 Add an item to the shop")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 10.0)
+        @app_commands.describe(name="Item name", description="Item description", price="Price in coins", role="Role to give (optional)", stock="Stock quantity (-1 for unlimited)")
+        @log_command
+        async def addshopitem(interaction: discord.Interaction, name: str, description: str, price: int, role: discord.Role = None, stock: int = -1):
+            db_execute("INSERT INTO shop_items (guild_id, name, description, price, role_id, stock) VALUES (?,?,?,?,?,?)",
+                       (str(interaction.guild.id), name, description, price, str(role.id) if role else None, stock))
+            embed = discord.Embed(title="✅ Shop Item Added", description=f"Added **{name}** for {price} coins!", color=discord.Color.green())
+            await interaction.response.send_message(embed=embed)
+
+        # ═════════════════════════════════════════════════════════════════════
+        # SECTION 8: WELCOME/GREETING SYSTEM
+        # ═════════════════════════════════════════════════════════════════════
+
+        @self.tree.command(name="setup_welcome", description="👋 Setup welcome message")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 30.0)
+        @log_command
+        async def setup_welcome(interaction: discord.Interaction):
+            class WelcomeModal(Modal, title="👋 Welcome Setup"):
+                channel = TextInput(label="Channel ID", placeholder="Enter channel ID", required=True)
+                message = TextInput(label="Message", placeholder="Welcome {user} to {server}!", required=True, max_length=500)
+                image = TextInput(label="Image URL", placeholder="https://example.com/image.png", required=False)
+                
+                async def on_submit(self, modal_interaction: discord.Interaction):
+                    try:
+                        channel_id = int(self.channel.value)
+                        channel = modal_interaction.guild.get_channel(channel_id)
+                        if not channel:
+                            await modal_interaction.response.send_message("❌ Invalid channel!", ephemeral=True)
+                            return
+                        
+                        db_execute("""INSERT OR REPLACE INTO guild_settings 
+                                     (guild_id, welcome_channel_id, welcome_message, welcome_image) 
+                                     VALUES (?,?,?,?)""",
+                                   (str(modal_interaction.guild.id), self.channel.value, self.message.value, self.image.value or None))
+                        
+                        embed = discord.Embed(
+                            title="👋 Welcome Setup Complete",
+                            description=f"Channel: {channel.mention}\nMessage: {self.message.value[:50]}...",
+                            color=discord.Color.green()
+                        )
+                        if self.image.value:
+                            embed.set_image(url=self.image.value)
+                        await modal_interaction.response.send_message(embed=embed)
+                    except ValueError:
+                        await modal_interaction.response.send_message("❌ Invalid channel ID!", ephemeral=True)
+            
+            await interaction.response.send_modal(WelcomeModal())
+
+        @self.tree.command(name="setup_goodbye", description="👋 Setup goodbye message")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 30.0)
+        @log_command
+        async def setup_goodbye(interaction: discord.Interaction):
+            class GoodbyeModal(Modal, title="👋 Goodbye Setup"):
+                channel = TextInput(label="Channel ID", placeholder="Enter channel ID", required=True)
+                message = TextInput(label="Message", placeholder="Goodbye {user}!", required=True, max_length=500)
+                image = TextInput(label="Image URL", placeholder="https://example.com/image.png", required=False)
+                
+                async def on_submit(self, modal_interaction: discord.Interaction):
+                    try:
+                        channel_id = int(self.channel.value)
+                        channel = modal_interaction.guild.get_channel(channel_id)
+                        if not channel:
+                            await modal_interaction.response.send_message("❌ Invalid channel!", ephemeral=True)
+                            return
+                        
+                        db_execute("""INSERT OR REPLACE INTO guild_settings 
+                                     (guild_id, goodbye_channel_id, goodbye_message, goodbye_image) 
+                                     VALUES (?,?,?,?)""",
+                                   (str(modal_interaction.guild.id), self.channel.value, self.message.value, self.image.value or None))
+                        
+                        embed = discord.Embed(
+                            title="👋 Goodbye Setup Complete",
+                            description=f"Channel: {channel.mention}\nMessage: {self.message.value[:50]}...",
+                            color=discord.Color.orange()
+                        )
+                        if self.image.value:
+                            embed.set_image(url=self.image.value)
+                        await modal_interaction.response.send_message(embed=embed)
+                    except ValueError:
+                        await modal_interaction.response.send_message("❌ Invalid channel ID!", ephemeral=True)
+            
+            await interaction.response.send_modal(GoodbyeModal())
+
+        # ═════════════════════════════════════════════════════════════════════
+        # SECTION 9: SETUP SERVER
+        # ═════════════════════════════════════════════════════════════════════
+
+        class SetupServerView(View):
+            def __init__(self):
+                super().__init__(timeout=300)
+                self.values = {}
+                self.add_item(ChannelSelect(channel_types=[discord.ChannelType.text], placeholder="Select log channel", custom_id="setup_log"))
+                self.add_item(ChannelSelect(channel_types=[discord.ChannelType.text], placeholder="Select transcript channel", custom_id="setup_transcript"))
+                self.add_item(RoleSelect(placeholder="Select verified role", custom_id="setup_verified"))
+                self.add_item(RoleSelect(placeholder="Select unverified role", custom_id="setup_unverified"))
+                
+                for child in self.children:
+                    async def cb(interaction, c=child):
+                        self.values[c.custom_id] = c.values[0].id if c.values else None
+                        await interaction.response.defer()
+                    child.callback = cb
+            
+            @discord.ui.button(label="💾 Save Configuration", style=discord.ButtonStyle.success)
+            async def save(self, i, b):
+                db_execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (str(i.guild.id),))
+                mapping = {
+                    'setup_log': 'log_channel_id',
+                    'setup_transcript': 'transcript_channel_id',
+                    'setup_verified': 'verified_role_id',
+                    'setup_unverified': 'unverified_role_id'
+                }
+                for k, col in mapping.items():
+                    if k in self.values and self.values[k]:
+                        db_execute(f"UPDATE guild_settings SET {col}=? WHERE guild_id=?", (str(self.values[k]), str(i.guild.id)))
+                
+                await i.response.send_message("✅ Server configuration saved! You can run `/server_status` to review it.", ephemeral=True)
+
+        @self.tree.command(name="setup_server", description="⚙️ Configure your server")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 60.0)
+        @log_command
+        async def setup_server(interaction):
+            await interaction.response.send_message("Configure channels and roles, then press **Save Configuration**.", view=SetupServerView(), ephemeral=True)
+
+        @self.tree.command(name="server_status", description="📊 View server configuration status")
+        @app_commands.checks.cooldown(1, 5.0)
+        @log_command
+        async def server_status(interaction):
+            settings = db_fetch_one("SELECT * FROM guild_settings WHERE guild_id=?", (str(interaction.guild.id),))
+            e = discord.Embed(title=f"📊 {interaction.guild.name} • Configuration", color=discord.Color.blurple())
+            
+            if not settings:
+                e.description = "No settings configured yet. Run `/setup_server`."
+                return await interaction.response.send_message(embed=e, ephemeral=True)
+            
+            fields = [
+                ('✅ Verified Role', 'verified_role_id'),
+                ('✅ Unverified Role', 'unverified_role_id'),
+                ('✅ Log Channel', 'log_channel_id'),
+                ('✅ Transcript Channel', 'transcript_channel_id'),
+                ('✅ Welcome Channel', 'welcome_channel_id'),
+                ('✅ Goodbye Channel', 'goodbye_channel_id')
+            ]
+            
+            for label, key in fields:
+                v = settings[key]
+                if v:
+                    if 'Role' in label:
+                        e.add_field(name=label, value=f"<@&{v}>", inline=True)
+                    else:
+                        e.add_field(name=label, value=f"<#{v}>", inline=True)
+                else:
+                    e.add_field(name=label, value='❌ Not configured', inline=True)
+            
+            e.add_field(name='🛡️ Anti-Nuke', value='🟢 Enabled' if settings['anti_nuke'] else '⚪ Disabled')
+            e.add_field(name='🛡️ Raid Protection', value='🟢 Enabled' if settings['raid_protection'] else '⚪ Disabled')
+            e.add_field(name='🛡️ Auto-Mod', value='🟢 Enabled' if settings['automod_enabled'] else '⚪ Disabled')
+            e.add_field(name='📈 Leveling', value='🟢 Enabled' if settings['leveling_enabled'] else '⚪ Disabled')
+            e.add_field(name='📈 XP Multiplier', value=f"{settings['xp_multiplier']}x" if settings['xp_multiplier'] else '1.0x')
+            
+            await interaction.response.send_message(embed=e, ephemeral=True)
+
+        # ═════════════════════════════════════════════════════════════════════
+        # SECTION 10: USER PASSWORD SYSTEM
+        # ═════════════════════════════════════════════════════════════════════
+
+        async def generate_user_password(member, guild_id):
+            username = f"user_{member.id}_{random.randint(100,999)}"
+            password = secrets.token_urlsafe(12)
+
+            db_execute("""INSERT OR REPLACE INTO user_passwords 
+                         (user_id, guild_id, username, password, role_level) 
+                         VALUES (?,?,?,?,?)""",
+                       (str(member.id), str(guild_id), username, password, 'user'))
+
+            firebase_save_password(str(member.id), str(guild_id), {
+                'username': username,
+                'password': password,
+                'role_level': 'user',
+                'user_id': str(member.id),
+                'updated_at': datetime.now().isoformat()
+            })
+
+            try:
+                embed = discord.Embed(
+                    title="🔐 Your Account Credentials",
+                    description=f"**Username:** `{username}`\n**Password:** `{password}`",
+                    color=discord.Color.blue()
+                )
+                embed.add_field(name="📌 Note", value="Keep these credentials safe!", inline=False)
+                await member.send(embed=embed)
+            except:
+                pass
+
+            return username, password
+
+        @self.tree.command(name="mycreds", description="🔑 Get your credentials")
+        @app_commands.checks.cooldown(1, 10.0)
+        @log_command
+        async def mycreds(interaction: discord.Interaction):
+            data = db_fetch_one("SELECT username, password, role_level FROM user_passwords WHERE user_id=? AND guild_id=?",
+                               (str(interaction.user.id), str(interaction.guild.id)))
+            
+            if not data:
+                await interaction.response.send_message("❌ No credentials found! Contact an admin.", ephemeral=True)
+                return
+            
+            embed = discord.Embed(
+                title="🔑 Your Credentials",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Username", value=f"`{data['username']}`", inline=True)
+            embed.add_field(name="Password", value=f"`{data['password']}`", inline=True)
+            embed.add_field(name="Role", value=f"`{data['role_level'].upper()}`", inline=True)
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        @self.tree.command(name="update_role_level", description="⚙️ Update user role level")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 5.0)
+        @app_commands.describe(user="User to update", level="Role level (user, moderator, admin)")
+        @log_command
+        async def update_role_level(interaction: discord.Interaction, user: discord.Member, level: str):
+            if level not in ['user', 'moderator', 'admin']:
+                await interaction.response.send_message("❌ Invalid level! Use: user, moderator, admin", ephemeral=True)
+                return
+
+            db_execute("UPDATE user_passwords SET role_level=?, updated_at=? WHERE user_id=? AND guild_id=?",
+                       (level, datetime.now().isoformat(), str(user.id), str(interaction.guild.id)))
+
+            firebase_save_password(str(user.id), str(interaction.guild.id), {
+                'username': f"user_{user.id}",
+                'password': '****',
+                'role_level': level,
+                'user_id': str(user.id),
+                'updated_at': datetime.now().isoformat()
+            })
+
+            embed = discord.Embed(
+                title="✅ Role Level Updated",
+                description=f"{user.mention} is now a **{level}**!",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(name="reset_password", description="🔄 Reset user password")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.checks.cooldown(1, 10.0)
+        @app_commands.describe(user="User to reset password for")
+        @log_command
+        async def reset_password(interaction: discord.Interaction, user: discord.Member):
+            username = f"user_{user.id}_{random.randint(100,999)}"
+            password = secrets.token_urlsafe(12)
+            
+            db_execute("UPDATE user_passwords SET username=?, password=?, updated_at=? WHERE user_id=? AND guild_id=?",
+                       (username, password, datetime.now().isoformat(), str(user.id), str(interaction.guild.id)))
+            
+            firebase_save_password(str(user.id), str(interaction.guild.id), {
+                'username': username,
+                'password': password,
+                'role_level': 'user',
+                'user_id': str(user.id),
+                'updated_at': datetime.now().isoformat()
+            })
+            
+            try:
+                embed = discord.Embed(
+                    title="🔄 Password Reset",
+                    description=f"**Username:** `{username}`\n**Password:** `{password}`",
+                    color=discord.Color.blue()
+                )
+                await user.send(embed=embed)
+            except:
+                pass
+            
+            embed = discord.Embed(
+                title="✅ Password Reset",
+                description=f"New credentials sent to {user.mention}",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed)
+
+        # ═════════════════════════════════════════════════════════════════════
+        # SECTION 11: OP FUN PANEL
         # ═════════════════════════════════════════════════════════════════════
 
         class DmAllModal(Modal, title="📨 DM All Members"):
@@ -2375,7 +2994,6 @@ class AnionBot(commands.Bot):
                 sent = 0
                 failed = 0
                 
-                # Send in batches of 10 with delays
                 for i in range(0, total, 10):
                     batch = members[i:i+10]
                     for member in batch:
@@ -2385,7 +3003,7 @@ class AnionBot(commands.Bot):
                             await asyncio.sleep(0.5)
                         except:
                             failed += 1
-                    await asyncio.sleep(1)  # Delay between batches
+                    await asyncio.sleep(1)
                 
                 await interaction.followup.send(
                     f"✅ DM Results:\n• Sent: {sent}\n• Failed: {failed}\n• Total: {total}",
@@ -2438,12 +3056,12 @@ class AnionBot(commands.Bot):
                 await interaction.response.send_message("✅ Announcement sent!", ephemeral=True)
 
         class DmUserModal(Modal, title="📨 DM User"):
-            user_id = TextInput(label="👤 User ID", placeholder="Enter user ID", required=True)
+            user = TextInput(label="👤 User ID", placeholder="Enter user ID", required=True)
             message = TextInput(label="📝 Message", placeholder="Enter message", required=True, max_length=500)
 
             async def on_submit(self, interaction: discord.Interaction):
                 try:
-                    user = await interaction.guild.fetch_member(int(self.user_id.value))
+                    user = await interaction.guild.fetch_member(int(self.user.value))
                     if user:
                         await user.send(self.message.value)
                         await interaction.response.send_message(f"✅ DM sent to {user.mention}!", ephemeral=True)
@@ -2456,21 +3074,21 @@ class AnionBot(commands.Bot):
             def __init__(self):
                 super().__init__(timeout=180)
             
-            @discord.ui.button(label="DM All", emoji="📨", style=discord.ButtonStyle.primary)
+            @discord.ui.button(label="📨 DM All", emoji="📨", style=discord.ButtonStyle.primary)
             async def all_dm(self, i, b):
                 if not i.user.guild_permissions.administrator:
                     return await i.response.send_message('Admins only.', ephemeral=True)
                 await i.response.send_modal(DmAllModal())
             
-            @discord.ui.button(label="Create Embed", emoji="📊", style=discord.ButtonStyle.success)
+            @discord.ui.button(label="📊 Create Embed", emoji="📊", style=discord.ButtonStyle.success)
             async def emb(self, i, b):
                 await i.response.send_modal(EmbedModal())
             
-            @discord.ui.button(label="Announcement", emoji="📢", style=discord.ButtonStyle.danger)
+            @discord.ui.button(label="📢 Announcement", emoji="📢", style=discord.ButtonStyle.danger)
             async def ann(self, i, b):
                 await i.response.send_modal(AnnouncementModal())
             
-            @discord.ui.button(label="DM User", emoji="👤", style=discord.ButtonStyle.secondary)
+            @discord.ui.button(label="👤 DM User", emoji="👤", style=discord.ButtonStyle.secondary)
             async def dm(self, i, b):
                 await i.response.send_modal(DmUserModal())
 
@@ -2487,240 +3105,140 @@ class AnionBot(commands.Bot):
             view = OPFunView()
             await interaction.response.send_message(embed=embed, view=view)
 
-        @self.tree.command(name="dm_all", description="📨 DM all members")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 60.0)
-        @log_command
-        async def dm_all(interaction: discord.Interaction):
-            modal = DmAllModal()
-            await interaction.response.send_modal(modal)
-
-        @self.tree.command(name="send_embed", description="📊 Send an embed")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 10.0)
-        @log_command
-        async def send_embed(interaction: discord.Interaction):
-            modal = EmbedModal()
-            await interaction.response.send_modal(modal)
-
-        @self.tree.command(name="announce", description="📢 Send an announcement")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 10.0)
-        @log_command
-        async def announce(interaction: discord.Interaction):
-            modal = AnnouncementModal()
-            await interaction.response.send_modal(modal)
-
-        @self.tree.command(name="dm_user", description="📨 DM a specific user")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 10.0)
-        @log_command
-        async def dm_user(interaction: discord.Interaction):
-            modal = DmUserModal()
-            await interaction.response.send_modal(modal)
-
         # ═════════════════════════════════════════════════════════════════════
-        # 9. AUTO-MOD - BAD WORDS + SPAM (FIXED)
+        # SECTION 12: POKEMON SYSTEM
         # ═════════════════════════════════════════════════════════════════════
 
-        @self.tree.command(name="add_badword", description="🚫 Add a bad word (Admin)")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 5.0)
-        @app_commands.describe(word="Word to add")
-        @log_command
-        async def add_badword(interaction: discord.Interaction, word: str):
-            db_execute("INSERT OR REPLACE INTO bad_words (word, guild_id) VALUES (?,?)",
-                       (word.lower(), str(interaction.guild.id)))
-            embed = discord.Embed(title="✅ Bad Word Added", description=f"Added `{word}`", color=discord.Color.green())
-            await interaction.response.send_message(embed=embed)
+        class PokemonCatchView(View):
+            def __init__(self, pokemon, cp, is_shiny, is_legendary, is_mythical, guild_id):
+                super().__init__(timeout=60)
+                self.pokemon = pokemon
+                self.cp = cp
+                self.is_shiny = is_shiny
+                self.is_legendary = is_legendary
+                self.is_mythical = is_mythical
+                self.guild_id = guild_id
+                self.caught = False
 
-        @self.tree.command(name="remove_badword", description="🚫 Remove a bad word (Admin)")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 5.0)
-        @app_commands.describe(word="Word to remove")
-        @log_command
-        async def remove_badword(interaction: discord.Interaction, word: str):
-            db_delete("DELETE FROM bad_words WHERE word=? AND guild_id=?", (word.lower(), str(interaction.guild.id)))
-            embed = discord.Embed(title="✅ Bad Word Removed", description=f"Removed `{word}`", color=discord.Color.green())
-            await interaction.response.send_message(embed=embed)
-
-        @self.tree.command(name="list_badwords", description="🚫 List all bad words (Admin)")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 5.0)
-        @log_command
-        async def list_badwords(interaction: discord.Interaction):
-            words = db_fetch_all("SELECT word FROM bad_words WHERE guild_id=?", (str(interaction.guild.id),))
-            if not words:
-                await interaction.response.send_message("✅ No bad words configured!", ephemeral=True)
-                return
-            word_list = "\n".join([f"• {w['word']}" for w in words])
-            embed = discord.Embed(title="🚫 Bad Words", description=word_list, color=discord.Color.red())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-        # ─── EVENT HANDLERS WITH SPAM DETECTION ─────────────────────────────
-
-        async def on_message(self, message):
-            if message.author.bot:
-                return
-            
-            if message.guild:
-                settings = db_fetch_one("SELECT automod_enabled, spam_threshold, bad_words_enabled FROM guild_settings WHERE guild_id=?", 
-                                        (str(message.guild.id),))
+            @discord.ui.button(label="🎯 Catch!", style=discord.ButtonStyle.success, emoji="🎯")
+            async def catch(self, interaction: discord.Interaction, button: Button):
+                if self.caught:
+                    await interaction.response.send_message("❌ This Pokémon has already been caught!", ephemeral=True)
+                    return
                 
-                if settings and settings['automod_enabled']:
-                    # Spam detection
-                    threshold = settings['spam_threshold'] or 5
-                    spam_data = db_fetch_one(
-                        "SELECT message_count, last_message_at FROM spam_tracking WHERE user_id=? AND guild_id=?",
-                        (str(message.author.id), str(message.guild.id))
-                    )
-                    
-                    now = datetime.now()
-                    if spam_data:
-                        try:
-                            last_time = datetime.fromisoformat(spam_data['last_message_at'])
-                        except:
-                            last_time = now - timedelta(minutes=5)
-                        
-                        if (now - last_time).seconds < 5:
-                            count = spam_data['message_count'] + 1
-                            if count > threshold:
-                                await message.delete()
-                                await message.channel.send(f"⚠️ {message.author.mention} slow down! Please wait before sending more messages.")
-                                try:
-                                    await message.author.timeout(timedelta(minutes=5), reason="Spamming")
-                                except:
-                                    pass
-                                return
-                            db_execute(
-                                "UPDATE spam_tracking SET message_count=?, last_message_at=? WHERE user_id=? AND guild_id=?",
-                                (count, now.isoformat(), str(message.author.id), str(message.guild.id))
-                            )
-                        else:
-                            db_execute(
-                                "UPDATE spam_tracking SET message_count=1, last_message_at=? WHERE user_id=? AND guild_id=?",
-                                (now.isoformat(), str(message.author.id), str(message.guild.id))
-                            )
-                    else:
-                        db_execute(
-                            "INSERT INTO spam_tracking (user_id, guild_id, message_count, last_message_at) VALUES (?,?,?,?)",
-                            (str(message.author.id), str(message.guild.id), 1, now.isoformat())
-                        )
-                    
-                    # Bad words filter
-                    if settings.get('bad_words_enabled', True):
-                        bad_words = db_fetch_all("SELECT word FROM bad_words WHERE guild_id=?", (str(message.guild.id),))
-                        content = message.content.lower()
-                        for row in bad_words:
-                            if row['word'] in content:
-                                await message.delete()
-                                await message.channel.send(f"❌ {message.author.mention}, that word is not allowed!")
-                                db_execute("INSERT INTO warnings (user_id, guild_id, moderator_id, reason) VALUES (?,?,?,?)",
-                                           (str(message.author.id), str(message.guild.id), str(message.guild.me.id), f"Used banned word: {row['word']}"))
-                                return
-            
-            await self.process_commands(message)
+                catch_chance = 70 if self.is_mythical else 80 if self.is_legendary else 90
+                if self.is_shiny:
+                    catch_chance += 10
+                
+                caught = random.random() * 100 < catch_chance
+                
+                if caught:
+                    self.caught = True
+                    await self.save_pokemon(interaction)
+                    for child in self.children:
+                        child.disabled = True
+                    await interaction.message.edit(view=self)
+                else:
+                    await interaction.response.send_message(f"❌ The {self.pokemon['name']} escaped!", ephemeral=True)
 
-        # ═════════════════════════════════════════════════════════════════════
-        # 10. TEMPLATE COMMANDS
-        # ═════════════════════════════════════════════════════════════════════
-
-        @self.tree.command(name="savetemplate", description="💾 Save server template (Admin)")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 30.0)
-        @app_commands.describe(name="Template name")
-        @log_command
-        async def savetemplate(interaction: discord.Interaction, name: str):
-            guild = interaction.guild
-            template = {'name': guild.name, 'roles': [], 'channels': [], 'permissions': []}
-
-            for role in guild.roles:
-                if role.name != '@everyone':
-                    template['roles'].append({
-                        'name': role.name, 'color': role.color.value,
-                        'permissions': role.permissions.value,
-                        'hoist': role.hoist, 'mentionable': role.mentionable,
-                        'position': role.position
-                    })
-
-            for channel in guild.channels:
-                if isinstance(channel, discord.TextChannel) or isinstance(channel, discord.VoiceChannel):
-                    channel_data = {
-                        'name': channel.name,
-                        'type': str(channel.type).split('.')[-1],
-                        'position': channel.position,
-                        'category': channel.category.name if channel.category else None
-                    }
-                    if isinstance(channel, discord.TextChannel):
-                        channel_data['topic'] = channel.topic
-                        channel_data['nsfw'] = channel.nsfw
-                        channel_data['slowmode'] = channel.slowmode_delay
-                    if isinstance(channel, discord.VoiceChannel):
-                        channel_data['bitrate'] = channel.bitrate
-                        channel_data['user_limit'] = channel.user_limit
-                    template['channels'].append(channel_data)
-
-            template_id = secrets.token_urlsafe(8)
-            db_execute("INSERT OR REPLACE INTO server_templates (template_id, guild_id, name, template_json) VALUES (?,?,?,?)",
-                       (template_id, str(guild.id), name, json.dumps(template)))
-
-            embed = discord.Embed(
-                title="✅ Template Saved",
-                description=f"Template: {name}\nID: {template_id}\nRoles: {len(template['roles'])}\nChannels: {len(template['channels'])}",
-                color=discord.Color.green()
-            )
-            await interaction.response.send_message(embed=embed)
-
-        @self.tree.command(name="applytemplate", description="📥 Apply saved template (Admin)")
-        @app_commands.default_permissions(administrator=True)
-        @app_commands.checks.cooldown(1, 60.0)
-        @app_commands.describe(template_id="Template ID")
-        @log_command
-        async def applytemplate(interaction: discord.Interaction, template_id: str):
-            template_data = db_fetch_one("SELECT * FROM server_templates WHERE template_id=?", (template_id,))
-            if not template_data:
-                await interaction.response.send_message("❌ Template not found!", ephemeral=True)
-                return
-
-            guild = interaction.guild
-            template = json.loads(template_data['template_json'])
-
-            for role in template['roles']:
-                await guild.create_role(
-                    name=role['name'],
-                    color=discord.Color(role['color']),
-                    permissions=discord.Permissions(role['permissions']),
-                    hoist=role['hoist'],
-                    mentionable=role['mentionable']
+            async def save_pokemon(self, interaction):
+                user_id = str(interaction.user.id)
+                guild_id = str(self.guild_id)
+                pokemon = self.pokemon
+                
+                pokemon_id = f"{pokemon['name']}_{user_id}_{random.randint(1000, 9999)}"
+                
+                # Store in database
+                db_execute("""INSERT INTO pokemon_collection 
+                             (user_id, guild_id, pokemon_name, pokemon_id, is_shiny, is_legendary, is_mythical, cp, caught_at) 
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           (user_id, guild_id, pokemon["name"], pokemon_id, self.is_shiny, self.is_legendary, self.is_mythical, self.cp, datetime.now().isoformat()))
+                
+                # Update stats
+                db_execute("INSERT OR IGNORE INTO pokemon_users (user_id, guild_id) VALUES (?, ?)", (user_id, guild_id))
+                db_execute("UPDATE pokemon_users SET pokemon_count = pokemon_count + 1, total_caught = total_caught + 1 WHERE user_id=? AND guild_id=?", 
+                          (user_id, guild_id))
+                
+                # Reward
+                reward = random.randint(10, 50)
+                if self.is_shiny:
+                    reward += 30
+                if self.is_legendary:
+                    reward += 50
+                if self.is_mythical:
+                    reward += 100
+                
+                db_execute("UPDATE economy SET coins = coins + ? WHERE user_id=? AND guild_id=?", (reward, user_id, guild_id))
+                
+                shiny_text = "✨ **SHINY!** ✨" if self.is_shiny else ""
+                legendary_text = "🌟 **LEGENDARY!** 🌟" if self.is_legendary else ""
+                mythical_text = "💫 **MYTHICAL!** 💫" if self.is_mythical else ""
+                
+                embed = discord.Embed(
+                    title=f"🎣 Caught {pokemon['name']}!",
+                    description=f"{interaction.user.mention} caught {pokemon['name']}! {shiny_text} {legendary_text} {mythical_text}\n\n"
+                               f"**CP:** {self.cp}\n"
+                               f"**Reward:** {reward} coins 🪙",
+                    color=discord.Color.green()
                 )
+                await interaction.response.send_message(embed=embed)
 
-            for channel in template['channels']:
-                if channel['type'] == 'text':
-                    await guild.create_text_channel(
-                        channel['name'],
-                        topic=channel.get('topic'),
-                        nsfw=channel.get('nsfw', False),
-                        slowmode_delay=channel.get('slowmode', 0)
-                    )
-                elif channel['type'] == 'voice':
-                    await guild.create_voice_channel(
-                        channel['name'],
-                        bitrate=channel.get('bitrate', 64000),
-                        user_limit=channel.get('user_limit', 0)
-                    )
-
+        @self.tree.command(name="catch", description="🎣 Try to catch a wild Pokémon!")
+        @app_commands.checks.cooldown(1, 30.0)
+        @log_command
+        async def catch_pokemon(interaction: discord.Interaction):
+            POKEMON_LIST = [
+                {"name": "Pikachu", "emoji": "⚡", "rarity": "common", "base_cp": 300, "max_cp": 800},
+                {"name": "Charizard", "emoji": "🔥", "rarity": "rare", "base_cp": 800, "max_cp": 1800},
+                {"name": "Mewtwo", "emoji": "🔮", "rarity": "legendary", "base_cp": 1500, "max_cp": 3000},
+                {"name": "Mew", "emoji": "✨", "rarity": "mythical", "base_cp": 1200, "max_cp": 2500},
+                {"name": "Dragonite", "emoji": "🐉", "rarity": "rare", "base_cp": 900, "max_cp": 2000},
+                {"name": "Gengar", "emoji": "👻", "rarity": "uncommon", "base_cp": 600, "max_cp": 1400},
+                {"name": "Snorlax", "emoji": "😴", "rarity": "rare", "base_cp": 700, "max_cp": 1600},
+                {"name": "Eevee", "emoji": "🦊", "rarity": "common", "base_cp": 250, "max_cp": 700},
+                {"name": "Lucario", "emoji": "🥊", "rarity": "rare", "base_cp": 800, "max_cp": 1900},
+                {"name": "Gardevoir", "emoji": "💜", "rarity": "uncommon", "base_cp": 650, "max_cp": 1500},
+            ]
+            
+            pokemon = random.choice(POKEMON_LIST)
+            is_shiny = random.random() < 0.02
+            is_legendary = pokemon["rarity"] == "legendary"
+            is_mythical = pokemon["rarity"] == "mythical"
+            cp = random.randint(pokemon["base_cp"], pokemon["max_cp"])
+            
+            view = PokemonCatchView(pokemon, cp, is_shiny, is_legendary, is_mythical, interaction.guild.id)
+            
+            shiny_text = "✨ **SHINY!** ✨" if is_shiny else ""
+            legendary_text = "🌟 **LEGENDARY!** 🌟" if is_legendary else ""
+            mythical_text = "💫 **MYTHICAL!** 💫" if is_mythical else ""
+            
             embed = discord.Embed(
-                title="✅ Template Applied",
-                description=f"Applied template to **{guild.name}**",
+                title=f"🎣 Wild {pokemon['name']} Appeared!",
+                description=f"A wild {pokemon['name']} appeared! {shiny_text} {legendary_text} {mythical_text}\n\n"
+                           f"**CP:** {cp}\n"
+                           f"**Rarity:** {pokemon['rarity'].capitalize()}\n\n"
+                           f"Click **Catch!** to try and catch it!",
+                color=discord.Color.blue()
+            )
+            await interaction.response.send_message(embed=embed, view=view)
+
+        # ═════════════════════════════════════════════════════════════════════
+        # SECTION 13: UTILITY COMMANDS
+        # ═════════════════════════════════════════════════════════════════════
+
+        @self.tree.command(name="ping", description="🏓 Check bot latency")
+        @app_commands.checks.cooldown(1, 3.0)
+        @log_command
+        async def ping(interaction: discord.Interaction):
+            latency = round(interaction.client.latency * 1000)
+            embed = discord.Embed(
+                title="🏓 Pong!",
+                description=f"Latency: {latency}ms",
                 color=discord.Color.green()
             )
-            embed.add_field(name="Roles", value=len(template['roles']), inline=True)
-            embed.add_field(name="Channels", value=len(template['channels']), inline=True)
+            embed.add_field(name="Uptime", value=str(datetime.now() - self.start_time).split('.')[0], inline=True)
+            embed.add_field(name="Servers", value=len(self.guilds), inline=True)
             await interaction.response.send_message(embed=embed)
-
-        # ═════════════════════════════════════════════════════════════════════
-        # 11. UTILITY COMMANDS
-        # ═════════════════════════════════════════════════════════════════════
 
         @self.tree.command(name="serverinfo", description="📊 Server information")
         @app_commands.checks.cooldown(1, 5.0)
@@ -2758,19 +3276,6 @@ class AnionBot(commands.Bot):
             embed.add_field(name="Is Bot", value="✅ Yes" if target.bot else "❌ No", inline=True)
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="ping", description="🏓 Check latency")
-        @app_commands.checks.cooldown(1, 3.0)
-        @log_command
-        async def ping(interaction: discord.Interaction):
-            latency = round(interaction.client.latency * 1000)
-            embed = discord.Embed(
-                title="🏓 Pong!",
-                description=f"Latency: {latency}ms",
-                color=discord.Color.green()
-            )
-            embed.add_field(name="Uptime", value=str(datetime.now() - bot_instance.start_time).split('.')[0], inline=True)
-            await interaction.response.send_message(embed=embed)
-
         @self.tree.command(name="list_all", description="📋 Show all commands")
         @app_commands.checks.cooldown(1, 10.0)
         @log_command
@@ -2781,21 +3286,28 @@ class AnionBot(commands.Bot):
                 color=discord.Color.blue()
             )
             embed.set_thumbnail(url=interaction.guild.me.display_avatar.url)
+            
             embed.add_field(name="🔐 Verification", value="/verify /verifystatus /setverifiedrole /setunverifiedrole /setlogchannel /setupverify", inline=False)
-            embed.add_field(name="🎁 Giveaways", value="/giveaway_host /giveaway_end /giveaway_reroll /setgiveawayrole", inline=False)
+            embed.add_field(name="🎁 Giveaways", value="/giveaway /giveaway_end /giveaway_reroll", inline=False)
             embed.add_field(name="🎫 Tickets", value="/setup_ticket /ticket /setticketsupportrole", inline=False)
-            embed.add_field(name="👋 Welcome", value="/setup_welcome /setup_goodbye /setwelcomechannel /setgoodbyechannel", inline=False)
+            embed.add_field(name="📈 Leveling", value="/rank /leaderboard /setlevelrole", inline=False)
+            embed.add_field(name="👋 Welcome", value="/setup_welcome /setup_goodbye", inline=False)
             embed.add_field(name="⚙️ Setup", value="/setup_server /server_status", inline=False)
-            embed.add_field(name="🛡️ Moderation", value="/mod /ban /unban /kick /mute /unmute /warn /unwarn /timeout /deafen /lock /unlock /clear", inline=False)
-            embed.add_field(name="🎯 OP Fun", value="/opfun /dm_all /send_embed /announce /dm_user", inline=False)
-            embed.add_field(name="🔑 Passwords", value="/update_role_level /show_passwords /reset_password", inline=False)
+            embed.add_field(name="🛡️ Moderation", value="/mod /ban /unban /kick /mute /unmute /warn /warnings /unwarn /clear", inline=False)
+            embed.add_field(name="💰 Economy", value="/balance /daily /shop /buy /addshopitem", inline=False)
+            embed.add_field(name="🎯 OP Fun", value="/opfun", inline=False)
+            embed.add_field(name="🔑 Passwords", value="/mycreds /update_role_level /reset_password", inline=False)
             embed.add_field(name="🚫 Auto-Mod", value="/add_badword /remove_badword /list_badwords", inline=False)
-            embed.add_field(name="📁 Templates", value="/savetemplate /applytemplate", inline=False)
-            embed.add_field(name="🔧 Utility", value="/serverinfo /userinfo /ping", inline=False)
+            embed.add_field(name="🎮 Pokemon", value="/catch", inline=False)
+            embed.add_field(name="🔧 Utility", value="/serverinfo /userinfo /ping /list_all", inline=False)
+            
             await interaction.response.send_message(embed=embed)
+
+    # ─── EVENT HANDLERS ────────────────────────────────────────────────────
 
     async def on_ready(self):
         logger.info("╔══════════════════════════════════════════════════════════════════╗")
+        logger.info("║           🔐 ANION BOT v15.0 - ULTIMATE EDITION                ║")
         logger.info("║              ✅✅✅ BOT IS ONLINE! ✅✅✅                           ║")
         logger.info("╚══════════════════════════════════════════════════════════════════╝")
         logger.info(f"📡 Name: {self.user.name}")
@@ -2805,9 +3317,111 @@ class AnionBot(commands.Bot):
             logger.info(f"   - {guild.name} ({guild.id})")
         logger.info("═" * 70)
         logger.info("📋 ALL FEATURES LOADED!")
+        logger.info("   ✅ Verification System")
+        logger.info("   ✅ Giveaway System")
+        logger.info("   ✅ Ticket System")
+        logger.info("   ✅ Leveling System")
+        logger.info("   ✅ Moderation System")
+        logger.info("   ✅ Economy System")
+        logger.info("   ✅ Auto-Mod System")
+        logger.info("   ✅ Password System")
+        logger.info("   ✅ Pokemon System")
+        logger.info("   ✅ OP Fun Panel")
+        logger.info("   ✅ Utility Commands")
         logger.info("═" * 70)
 
+    async def on_message(self, message):
+        if message.author.bot:
+            return
+        
+        if message.guild:
+            # ─── LEVELING ──────────────────────────────────────────────
+            settings = db_fetch_one("SELECT leveling_enabled, xp_multiplier FROM guild_settings WHERE guild_id=?", 
+                                    (str(message.guild.id),))
+            
+            if settings and settings['leveling_enabled']:
+                user_id = str(message.author.id)
+                guild_id = str(message.guild.id)
+                multiplier = settings['xp_multiplier'] or 1.0
+                
+                xp_gain = int(random.randint(15, 25) * multiplier)
+                
+                db_execute("INSERT OR IGNORE INTO levels (user_id, guild_id) VALUES (?,?)", (user_id, guild_id))
+                db_execute("UPDATE levels SET xp = xp + ?, messages = messages + 1, last_message = ? WHERE user_id=? AND guild_id=?",
+                          (xp_gain, datetime.now().isoformat(), user_id, guild_id))
+                
+                data = db_fetch_one("SELECT xp, level FROM levels WHERE user_id=? AND guild_id=?", (user_id, guild_id))
+                if data:
+                    xp_needed = 100 * (data['level'] + 1) ** 2
+                    if data['xp'] >= xp_needed:
+                        new_level = data['level'] + 1
+                        db_execute("UPDATE levels SET xp = 0, level = ? WHERE user_id=? AND guild_id=?", 
+                                  (new_level, user_id, guild_id))
+                        
+                        # Check level roles
+                        level_roles = db_fetch_all("SELECT role_id FROM level_roles WHERE guild_id=? AND level=?", 
+                                                  (guild_id, new_level))
+                        for lr in level_roles:
+                            role = message.guild.get_role(int(lr['role_id']))
+                            if role:
+                                await message.author.add_roles(role)
+                        
+                        await message.channel.send(f"🎉 {message.author.mention} leveled up to **Level {new_level}**!")
+            
+            # ─── AUTO-MOD ──────────────────────────────────────────────
+            settings = db_fetch_one("SELECT automod_enabled, spam_threshold, bad_words_enabled FROM guild_settings WHERE guild_id=?", 
+                                    (str(message.guild.id),))
+            
+            if settings and settings['automod_enabled']:
+                # Spam detection
+                threshold = settings['spam_threshold'] or 5
+                spam_data = db_fetch_one(
+                    "SELECT message_count, last_message_at FROM spam_tracking WHERE user_id=? AND guild_id=?",
+                    (str(message.author.id), str(message.guild.id))
+                )
+                
+                now = datetime.now()
+                if spam_data:
+                    try:
+                        last_time = datetime.fromisoformat(spam_data['last_message_at'])
+                    except:
+                        last_time = now - timedelta(minutes=5)
+                    
+                    if (now - last_time).seconds < 5:
+                        count = spam_data['message_count'] + 1
+                        if count > threshold:
+                            await message.delete()
+                            await message.channel.send(f"⚠️ {message.author.mention} slow down! Please wait before sending more messages.")
+                            try:
+                                await message.author.timeout(timedelta(minutes=5), reason="Spamming")
+                            except:
+                                pass
+                            return
+                        db_execute("UPDATE spam_tracking SET message_count=?, last_message_at=? WHERE user_id=? AND guild_id=?",
+                                  (count, now.isoformat(), str(message.author.id), str(message.guild.id)))
+                    else:
+                        db_execute("UPDATE spam_tracking SET message_count=1, last_message_at=? WHERE user_id=? AND guild_id=?",
+                                  (now.isoformat(), str(message.author.id), str(message.guild.id)))
+                else:
+                    db_execute("INSERT INTO spam_tracking (user_id, guild_id, message_count, last_message_at) VALUES (?,?,?,?)",
+                              (str(message.author.id), str(message.guild.id), 1, now.isoformat()))
+                
+                # Bad words filter
+                if settings.get('bad_words_enabled', True):
+                    bad_words = db_fetch_all("SELECT word, action FROM bad_words WHERE guild_id=?", (str(message.guild.id),))
+                    content = message.content.lower()
+                    for row in bad_words:
+                        if row['word'] in content:
+                            await message.delete()
+                            await message.channel.send(f"❌ {message.author.mention}, that word is not allowed!")
+                            db_execute("INSERT INTO warnings (user_id, guild_id, moderator_id, reason) VALUES (?,?,?,?)",
+                                      (str(message.author.id), str(message.guild.id), str(message.guild.me.id), f"Used banned word: {row['word']}"))
+                            return
+        
+        await self.process_commands(message)
+
     async def on_member_join(self, member):
+        # ─── WELCOME MESSAGE ──────────────────────────────────────────
         settings = db_fetch_one("SELECT welcome_channel_id, welcome_message, welcome_image FROM guild_settings WHERE guild_id=?", 
                                 (str(member.guild.id),))
         if settings and settings['welcome_channel_id']:
@@ -2830,17 +3444,25 @@ class AnionBot(commands.Bot):
 
                 await channel.send(embed=embed)
 
-        # Generate password
+        # ─── GENERATE PASSWORD ────────────────────────────────────────
         await generate_user_password(member, str(member.guild.id))
 
-        # Assign unverified role
+        # ─── ASSIGN UNVERIFIED ROLE ──────────────────────────────────
         settings2 = db_fetch_one("SELECT unverified_role_id FROM guild_settings WHERE guild_id=?", (str(member.guild.id),))
         if settings2 and settings2['unverified_role_id']:
             role = member.guild.get_role(int(settings2['unverified_role_id']))
             if role:
                 await member.add_roles(role)
 
+        # ─── AUTO ROLES ──────────────────────────────────────────────
+        auto_roles = db_fetch_all("SELECT role_id FROM auto_roles WHERE guild_id=?", (str(member.guild.id),))
+        for ar in auto_roles:
+            role = member.guild.get_role(int(ar['role_id']))
+            if role:
+                await member.add_roles(role)
+
     async def on_member_remove(self, member):
+        # ─── GOODBYE MESSAGE ─────────────────────────────────────────
         settings = db_fetch_one("SELECT goodbye_channel_id, goodbye_message, goodbye_image FROM guild_settings WHERE guild_id=?", 
                                 (str(member.guild.id),))
         if settings and settings['goodbye_channel_id']:
@@ -2864,6 +3486,10 @@ class AnionBot(commands.Bot):
         logger.error(f"Error in event {event}:")
         logger.error(traceback.format_exc())
 
+# ═════════════════════════════════════════════════════════════════════════════
+# RUN BOT
+# ═════════════════════════════════════════════════════════════════════════════
+
 bot_instance = None
 
 def run_flask():
@@ -2871,7 +3497,7 @@ def run_flask():
 
 async def main():
     global bot_instance
-    logger.info("🚀 Starting Anion Bot v14.1...")
+    logger.info("🚀 Starting Anion Bot v15.0 - ULTIMATE EDITION...")
     logger.info("═" * 70)
 
     flask_thread = threading.Thread(target=run_flask)
