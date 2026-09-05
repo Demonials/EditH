@@ -7,6 +7,13 @@
 ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 """
 
+#!/usr/bin/env python3
+"""
+═══════════════════════════════════════════════════════════════════════════════
+                    🔐 ANION COMPLETE BOT v11.0
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
 import os
 import sys
 import json
@@ -37,7 +44,7 @@ from dotenv import load_dotenv
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from discord.ui import View, Button, Modal, TextInput, Select, Item, ActionRow
+from discord.ui import View, Button, Modal, TextInput, Select, Item  # ⬅️ ActionRow HATAO
 
 load_dotenv()
 
