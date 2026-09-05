@@ -900,12 +900,6 @@ class AnionBot(commands.Bot):
 
     async def setup_hook(self):
         await self.register_commands()
-        # Reconcile giveaway state after restarts so stale rows do not remain open forever.
-        try:
-            now = datetime.now().isoformat()
-            db_execute("UPDATE giveaways SET ended=1 WHERE ended=0 AND ended_at IS NOT NULL AND ended_at<=?", (now,))
-        except Exception as exc:
-            print(f"Giveaway startup reconciliation error: {exc}")
         await self.tree.sync()
         print('✅ All commands synced!')
 
@@ -1067,6 +1061,8 @@ class AnionBot(commands.Bot):
                         select.callback = self.select_callback
                         self.add_item(select)
 
+                        # Image URL input
+                        self.add_item(Button(label="🖼️ Set Image URL", style=discord.ButtonStyle.secondary, custom_id="set_image"))
 
                     async def select_callback(self, select_interaction: discord.Interaction):
                         self.role = select_interaction.data['values'][0]
@@ -1096,17 +1092,14 @@ class AnionBot(commands.Bot):
                         )
                         if self.description:
                             embed.add_field(name="📝 Description", value=self.description, inline=False)
-                        # Banner-style image: custom image, otherwise bot logo as the banner.
-                        banner_url = self.image_url or str(self.guild.me.display_avatar.url)
-                        embed.set_image(url=banner_url)
+                        if self.image_url:
+                            embed.set_image(url=self.image_url)
+                        else:
+                            embed.set_thumbnail(url=self.guild.me.display_avatar.url)
 
                         embed.set_footer(text=f"Hosted by {button_interaction.user.display_name}")
 
-                        view = GiveawayButtonView(giveaway_id=0, role_id=str(role.id))
-                        message = await button_interaction.channel.send(embed=embed, view=view)
-                        await message.add_reaction("🎉")
-
-                        # Save to database
+                        # Save first so the interactive view receives a real giveaway ID
                         cursor = db_execute("""
                             INSERT INTO giveaways (message_id, channel_id, guild_id, prize, winners, ended_at, hosted_by, ping_role_id, image_url, description)
                             VALUES (?,?,?,?,?,?,?,?,?,?)
@@ -1117,7 +1110,9 @@ class AnionBot(commands.Bot):
                             self.image_url, self.description
                         ))
                         giveaway_id = cursor.lastrowid
-                        view.giveaway_id = giveaway_id
+                        view = GiveawayButtonView(giveaway_id=giveaway_id, role_id=str(role.id))
+                        message = await button_interaction.channel.send(embed=embed, view=view)
+                        db_execute("UPDATE giveaways SET message_id=? WHERE id=?", (str(message.id), giveaway_id))
 
                         # Ping role
                         await button_interaction.channel.send(f"{role.mention} 🎁 A new giveaway has started!")
@@ -1163,14 +1158,10 @@ class AnionBot(commands.Bot):
                     await interaction.followup.send("❌ This giveaway has ended!", ephemeral=True)
                     return
 
-                cursor = db_execute("INSERT OR IGNORE INTO giveaway_participants (giveaway_id, user_id) VALUES (?,?)",
-                                    (self.giveaway_id, str(interaction.user.id)))
-                if cursor.rowcount:
-                    db_execute("UPDATE giveaways SET participant_count = participant_count + 1 WHERE id=?", (self.giveaway_id,))
-                    text = "✅ You've joined the giveaway! Good luck! 🍀"
-                else:
-                    text = "ℹ️ You are already participating in this giveaway."
-                await interaction.followup.send(text, ephemeral=True)
+                cur=db_execute("INSERT OR IGNORE INTO giveaway_participants (giveaway_id, user_id) VALUES (?,?)", (self.giveaway_id, str(interaction.user.id)))
+                if getattr(cur, 'rowcount', 0): db_execute("UPDATE giveaways SET participant_count = participant_count + 1 WHERE id=?", (self.giveaway_id,))
+
+                await interaction.followup.send("✅ You've joined the giveaway! Good luck! 🍀", ephemeral=True)
 
             @discord.ui.button(label="❌ Leave Giveaway", style=discord.ButtonStyle.danger, custom_id="leave_giveaway", row=0)
             async def leave_giveaway(self, interaction: discord.Interaction, button: Button):
@@ -1180,13 +1171,8 @@ class AnionBot(commands.Bot):
                     await interaction.followup.send("❌ Giveaway not found!", ephemeral=True)
                     return
 
-                cursor = db_execute("DELETE FROM giveaway_participants WHERE giveaway_id=? AND user_id=?", (self.giveaway_id, str(interaction.user.id)))
-                if cursor.rowcount:
-                    db_execute("UPDATE giveaways SET participant_count = MAX(0, participant_count - 1) WHERE id=?", (self.giveaway_id,))
-                    text = "✅ You've left the giveaway."
-                else:
-                    text = "ℹ️ You were not participating in this giveaway."
-                await interaction.followup.send(text, ephemeral=True)
+                db_execute("DELETE FROM giveaway_participants WHERE giveaway_id=? AND user_id=?", (self.giveaway_id, str(interaction.user.id)))
+                await interaction.followup.send("✅ You've left the giveaway.", ephemeral=True)
 
             @discord.ui.button(label="👥 See Participants", style=discord.ButtonStyle.secondary, custom_id="see_participants", row=0)
             async def see_participants(self, interaction: discord.Interaction, button: Button):
@@ -1340,258 +1326,117 @@ class AnionBot(commands.Bot):
         # 3. TICKET COMMANDS - FULL GUI
         # ═════════════════════════════════════════════════════════════════════
 
-        class TicketSetupModal(Modal, title="🎫 Setup Ticket System"):
-            ticket_type = TextInput(label="📋 Ticket Type", placeholder="single / multi / dropdown", required=True, max_length=10)
-            button_count = TextInput(label="🔢 Number of Buttons", placeholder="1-10 (for multi/dropdown)", required=False, max_length=2)
+        class TicketTypeView(View):
+            def __init__(self):
+                super().__init__(timeout=180)
+                sel=Select(placeholder="Choose ticket panel type…", options=[
+                    discord.SelectOption(label="Single Button", value="single", description="One custom ticket button"),
+                    discord.SelectOption(label="Multi Button", value="multi", description="Up to 10 custom buttons"),
+                    discord.SelectOption(label="Drop Down", value="dropdown", description="One modern select menu")])
+                sel.callback=self.choose; self.add_item(sel)
+            async def choose(self, interaction):
+                await interaction.response.send_modal(TicketConfigModal(self.children[0].values[0]))
 
-            async def on_submit(self, interaction: discord.Interaction):
-                await interaction.response.defer(ephemeral=True)
-
-                ticket_type = self.ticket_type.value.lower()
-                if ticket_type not in ['single', 'multi', 'dropdown']:
-                    await interaction.followup.send("❌ Invalid type! Use: single, multi, dropdown", ephemeral=True)
-                    return
-
-                if ticket_type in ['multi', 'dropdown']:
-                    try:
-                        count = int(self.button_count.value) if self.button_count.value else 3
-                        if count < 1 or count > 10:
-                            raise ValueError
-                    except:
-                        await interaction.followup.send("❌ Button count must be 1-10!", ephemeral=True)
-                        return
-                else:
-                    count = 1
-
-                # Create category
-                category = discord.utils.get(interaction.guild.categories, name="🎫 Tickets")
-                if not category:
-                    category = await interaction.guild.create_category("🎫 Tickets")
-
-                # Create channel for ticket panel
-                channel = await interaction.guild.create_text_channel("🎫-tickets", category=category)
-
-                # Save settings
-                db_execute("""
-                    INSERT OR REPLACE INTO ticket_settings (guild_id, ticket_type, button_config)
-                    VALUES (?,?,?)
-                """, (str(interaction.guild.id), ticket_type, json.dumps({'count': count})))
-
-                # Create beautiful embed
-                embed = discord.Embed(
-                    title="🎫 Support Center",
-                    description="Select a category and click the button below to create a ticket.",
-                    color=discord.Color.blue()
-                )
-                embed.set_thumbnail(url=interaction.guild.me.display_avatar.url)
-                embed.set_footer(text="Our support team will assist you shortly.")
-
-                view = TicketPanelView(ticket_type, count)
-                await channel.send(embed=embed, view=view)
-
-                embed = discord.Embed(
-                    title="✅ Ticket System Setup Complete",
-                    description=f"Type: {ticket_type.title()}\nChannel: {channel.mention}",
-                    color=discord.Color.green()
-                )
-                await interaction.followup.send(embed=embed, ephemeral=True)
+        class TicketConfigModal(Modal, title="🎫 Configure Ticket Panel"):
+            panel_title=TextInput(label="Panel title", default="🎫 Support Center", max_length=100)
+            panel_description=TextInput(label="Panel description", default="Choose a category below and our team will help you.", style=discord.TextStyle.paragraph, max_length=1000)
+            options_text=TextInput(label="Buttons / options", placeholder="Billing | Payment help\nSupport | General support", style=discord.TextStyle.paragraph, max_length=1000)
+            def __init__(self, ticket_type): super().__init__(); self.ticket_type=ticket_type
+            async def on_submit(self, interaction):
+                rows=[]
+                for line in self.options_text.value.splitlines():
+                    line=line.strip()
+                    if not line: continue
+                    name, _, desc=line.partition('|'); name=name.strip(); desc=desc.strip()
+                    if name: rows.append({'name':name[:80], 'description':desc[:100]})
+                if not rows: return await interaction.response.send_message("❌ Add at least one option.", ephemeral=True)
+                if self.ticket_type=='single': rows=rows[:1]
+                if len(rows)>10: return await interaction.response.send_message("❌ Maximum is 10 options.", ephemeral=True)
+                config={'title':self.panel_title.value,'description':self.panel_description.value,'options':rows}
+                db_execute("INSERT OR REPLACE INTO ticket_settings (guild_id,ticket_type,button_config,dropdown_config) VALUES (?,?,?,?)", (str(interaction.guild.id),self.ticket_type,json.dumps(config),json.dumps(config)))
+                embed=discord.Embed(title=config['title'],description=config['description'],color=discord.Color.blurple())
+                embed.set_footer(text="Select the correct category • One open ticket per category is allowed")
+                await interaction.channel.send(embed=embed,view=TicketPanelView(interaction.guild.id,self.ticket_type,rows))
+                await interaction.response.send_message("✅ Ticket panel created in this channel with your custom names.",ephemeral=True)
 
         class TicketPanelView(View):
-            def __init__(self, ticket_type, count):
-                super().__init__(timeout=None)
-                self.ticket_type = ticket_type
-                self.count = count
+            def __init__(self,guild_id,ticket_type,options):
+                super().__init__(timeout=None); self.guild_id=guild_id
+                if ticket_type=='dropdown':
+                    sel=Select(placeholder="Select ticket category…")
+                    for i,o in enumerate(options): sel.add_option(label=o['name'],description=o['description'] or 'Open ticket',value=str(i))
+                    async def cb(interaction): await create_ticket_channel(interaction,options[int(sel.values[0])]['name'],options[int(sel.values[0])]['description'])
+                    sel.callback=cb; self.add_item(sel)
+                else:
+                    for i,o in enumerate(options):
+                        b=Button(label=o['name'],style=discord.ButtonStyle.primary if i==0 else discord.ButtonStyle.secondary,custom_id=f'ticket:{guild_id}:{i}')
+                        async def cb(interaction, idx=i): await create_ticket_channel(interaction,options[idx]['name'],options[idx]['description'])
+                        b.callback=cb; self.add_item(b)
 
-                if ticket_type == 'single':
-                    self.add_item(Button(label="🎫 Create Ticket", style=discord.ButtonStyle.primary, custom_id="create_ticket_single"))
-                elif ticket_type == 'multi':
-                    for i in range(count):
-                        self.add_item(Button(label=f"📌 Option {i+1}", style=discord.ButtonStyle.secondary, custom_id=f"ticket_option_{i}"))
-                elif ticket_type == 'dropdown':
-                    select = Select(placeholder="Select ticket category...", min_values=1, max_values=1)
-                    for i in range(count):
-                        select.add_option(label=f"Option {i+1}", value=f"option_{i}", description=f"Create ticket for option {i+1}")
-                    select.callback = self.dropdown_callback
-                    self.add_item(select)
-
-            async def dropdown_callback(self, interaction: discord.Interaction):
-                await interaction.response.defer(ephemeral=True)
-                await create_ticket_channel(interaction, "Dropdown")
-
-        async def create_ticket_channel(interaction, category_name):
-            ticket_id = f"ticket-{random.randint(100,999)}"
-            guild = interaction.guild
-            user = interaction.user
-
-            category = discord.utils.get(guild.categories, name="🎫 Tickets")
-            if not category:
-                category = await guild.create_category("🎫 Tickets")
-
-            overwrites = {
-                guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-                guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-            }
-
-            # Add support role
-            settings = db_fetch_one("SELECT ticket_support_role_id FROM guild_settings WHERE guild_id=?", (str(guild.id),))
+        async def create_ticket_channel(interaction, category_name, reason=""):
+            existing=db_fetch_one("SELECT channel_id FROM tickets WHERE guild_id=? AND user_id=? AND category=? AND status='open'",(str(interaction.guild.id),str(interaction.user.id),category_name))
+            if existing:
+                ch=interaction.guild.get_channel(int(existing['channel_id']))
+                if ch: return await interaction.response.send_message(f"You already have an open **{category_name}** ticket: {ch.mention}",ephemeral=True)
+            guild,user=interaction.guild,interaction.user
+            category=discord.utils.get(guild.categories,name='🎫 Tickets') or await guild.create_category('🎫 Tickets')
+            overwrites={guild.default_role:discord.PermissionOverwrite(view_channel=False),user:discord.PermissionOverwrite(view_channel=True,send_messages=True),guild.me:discord.PermissionOverwrite(view_channel=True,send_messages=True,manage_channels=True)}
+            settings=db_fetch_one("SELECT ticket_support_role_id FROM guild_settings WHERE guild_id=?",(str(guild.id),))
             if settings and settings['ticket_support_role_id']:
-                support_role = guild.get_role(int(settings['ticket_support_role_id']))
-                if support_role:
-                    overwrites[support_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-
-            channel = await guild.create_text_channel(
-                f"🎫-{ticket_id}",
-                category=category,
-                overwrites=overwrites,
-                topic=f"Ticket by {user.display_name} | Category: {category_name}"
-            )
-
-            db_execute("""
-                INSERT INTO tickets (ticket_id, guild_id, user_id, channel_id, category, reason)
-                VALUES (?,?,?,?,?,?)
-            """, (ticket_id, str(guild.id), str(user.id), str(channel.id), category_name, "Created via panel"))
-
-            embed = discord.Embed(
-                title="🎫 Ticket Created",
-                description=f"**Created by:** {user.mention}\n**Category:** {category_name}",
-                color=discord.Color.blue()
-            )
-            embed.set_thumbnail(url=user.display_avatar.url)
-            embed.set_footer(text=f"Ticket ID: {ticket_id}")
-
-            view = TicketControlsView(ticket_id)
-            await channel.send(embed=embed, view=view)
-            await interaction.followup.send(f"✅ Ticket created: {channel.mention}", ephemeral=True)
+                role=guild.get_role(int(settings['ticket_support_role_id']))
+                if role: overwrites[role]=discord.PermissionOverwrite(view_channel=True,send_messages=True)
+            ticket_id=f"{guild.id}-{user.id}-{random.randint(1000,9999)}"
+            ch=await guild.create_text_channel(f"ticket-{user.display_name}"[:95],category=category,overwrites=overwrites,topic=f"Ticket {ticket_id} • {category_name}")
+            db_execute("INSERT INTO tickets (ticket_id,guild_id,user_id,channel_id,category,reason) VALUES (?,?,?,?,?,?)",(ticket_id,str(guild.id),str(user.id),str(ch.id),category_name,reason or 'No description'))
+            e=discord.Embed(title=f"🎫 {category_name}",description=reason or "Please describe your issue. A staff member will assist you.",color=discord.Color.blurple())
+            e.set_author(name=f"Ticket for {user.display_name}",icon_url=user.display_avatar.url); e.set_footer(text=f"Ticket ID: {ticket_id}")
+            await ch.send(content=user.mention,embed=e,view=TicketControlsView(ticket_id))
+            await interaction.response.send_message(f"✅ Your ticket is ready: {ch.mention}",ephemeral=True)
 
         class TicketControlsView(View):
-            def __init__(self, ticket_id):
-                super().__init__(timeout=None)
-                self.ticket_id = ticket_id
-
-            @discord.ui.button(label="🔒 Close", style=discord.ButtonStyle.danger, custom_id="ticket_close", row=0)
-            async def close_ticket(self, interaction: discord.Interaction, button: Button):
-                ticket = db_fetch_one("SELECT * FROM tickets WHERE ticket_id=? AND status='open'", (self.ticket_id,))
-                if not ticket:
-                    await interaction.response.send_message("❌ Ticket not found!", ephemeral=True)
-                    return
-
-                embed = discord.Embed(
-                    title="🔒 Closing Ticket",
-                    description="Ticket will be closed in 5 seconds.",
-                    color=discord.Color.orange()
-                )
-                await interaction.channel.send(embed=embed)
-                await asyncio.sleep(5)
-                await interaction.channel.delete()
-                db_execute("UPDATE tickets SET status='closed', closed_at=? WHERE ticket_id=?", (datetime.now().isoformat(), self.ticket_id))
-
-            @discord.ui.button(label="🗑️ Delete", style=discord.ButtonStyle.danger, custom_id="ticket_delete", row=0)
-            async def delete_ticket(self, interaction: discord.Interaction, button: Button):
-                ticket = db_fetch_one("SELECT * FROM tickets WHERE ticket_id=?", (self.ticket_id,))
-                if not ticket:
-                    await interaction.response.send_message("❌ Ticket not found!", ephemeral=True)
-                    return
-
-                await interaction.channel.delete()
-                db_execute("DELETE FROM tickets WHERE ticket_id=?", (self.ticket_id,))
-
-            @discord.ui.button(label="📝 Transcript", style=discord.ButtonStyle.secondary, custom_id="ticket_transcript", row=0)
-            async def transcript(self, interaction: discord.Interaction, button: Button):
-                await interaction.response.defer(ephemeral=True)
-                messages = []
-                async for msg in interaction.channel.history(limit=100):
-                    timestamp = msg.created_at.strftime('%Y-%m-%d %H:%M')
-                    content = msg.content or "Embed/Attachment"
-                    messages.append(f"[{timestamp}] {msg.author.display_name}: {content}")
-
-                transcript = "\n".join(reversed(messages))
-                file = discord.File(io.StringIO(transcript), filename=f"transcript-{self.ticket_id}.txt")
-                await interaction.followup.send("📝 Transcript:", file=file, ephemeral=True)
-
-            @discord.ui.button(label="➕ Add User", style=discord.ButtonStyle.success, custom_id="ticket_add_user", row=1)
-            async def add_user(self, interaction: discord.Interaction, button: Button):
-                modal = AddUserModal(self.ticket_id)
-                await interaction.response.send_modal(modal)
-
-            @discord.ui.button(label="➖ Remove User", style=discord.ButtonStyle.danger, custom_id="ticket_remove_user", row=1)
-            async def remove_user(self, interaction: discord.Interaction, button: Button):
-                modal = RemoveUserModal(self.ticket_id)
-                await interaction.response.send_modal(modal)
-
-            @discord.ui.button(label="📝 Special Note", style=discord.ButtonStyle.primary, custom_id="ticket_special_note", row=1)
-            async def special_note(self, interaction: discord.Interaction, button: Button):
-                modal = SpecialNoteModal(self.ticket_id)
-                await interaction.response.send_modal(modal)
-
-        class AddUserModal(Modal, title="➕ Add User to Ticket"):
-            user_id = TextInput(label="User ID", placeholder="Enter user ID", required=True)
-
-            def __init__(self, ticket_id):
-                super().__init__()
-                self.ticket_id = ticket_id
-
-            async def on_submit(self, interaction: discord.Interaction):
+            def __init__(self,ticket_id): super().__init__(timeout=None); self.ticket_id=ticket_id
+            @discord.ui.button(label="Close Ticket",emoji="🔒",style=discord.ButtonStyle.secondary)
+            async def close(self,i,b):
+                db_execute("UPDATE tickets SET status='closed',closed_at=? WHERE ticket_id=?",(datetime.now().isoformat(),self.ticket_id)); await i.response.send_message("🔒 Ticket closed. Use Delete when finished.")
+            @discord.ui.button(label="Delete Ticket",emoji="🗑️",style=discord.ButtonStyle.danger)
+            async def delete(self,i,b):
+                await i.response.send_message("Deleting ticket…"); await asyncio.sleep(2); await i.channel.delete(); db_execute("DELETE FROM tickets WHERE ticket_id=?",(self.ticket_id,))
+            @discord.ui.button(label="Transcript",emoji="📄",style=discord.ButtonStyle.primary)
+            async def transcript(self,i,b):
+                await i.response.defer(ephemeral=True); lines=[]
+                async for m in i.channel.history(limit=1000,oldest_first=True): lines.append(f"[{m.created_at.isoformat()}] {m.author}: {m.content}")
+                await i.followup.send(file=discord.File(io.BytesIO('\n'.join(lines).encode()),filename=f"transcript-{self.ticket_id}.txt"),ephemeral=True)
+            @discord.ui.button(label="Add User",emoji="➕",style=discord.ButtonStyle.success)
+            async def add(self,i,b): await i.response.send_modal(TicketMemberModal(True))
+            @discord.ui.button(label="Remove User",emoji="➖",style=discord.ButtonStyle.secondary)
+            async def remove(self,i,b): await i.response.send_modal(TicketMemberModal(False))
+            @discord.ui.button(label="Special Note",emoji="📝",style=discord.ButtonStyle.primary)
+            async def note(self,i,b): await i.response.send_modal(SpecialNoteModal(self.ticket_id))
+        class TicketMemberModal(Modal,title="Ticket Member"):
+            member_id=TextInput(label="Member ID",placeholder="Discord user ID")
+            def __init__(self,add): super().__init__(); self.add=add; self.title='Add User to Ticket' if add else 'Remove User from Ticket'
+            async def on_submit(self,i):
                 try:
-                    user = interaction.guild.get_member(int(self.user_id.value))
-                    if not user:
-                        await interaction.response.send_message("❌ User not found!", ephemeral=True)
-                        return
-                    await interaction.channel.set_permissions(user, read_messages=True, send_messages=True)
-                    await interaction.response.send_message(f"✅ Added {user.mention}!", ephemeral=True)
-                except:
-                    await interaction.response.send_message("❌ Invalid user ID!", ephemeral=True)
-
-        class RemoveUserModal(Modal, title="➖ Remove User from Ticket"):
-            user_id = TextInput(label="User ID", placeholder="Enter user ID", required=True)
-
-            def __init__(self, ticket_id):
-                super().__init__()
-                self.ticket_id = ticket_id
-
-            async def on_submit(self, interaction: discord.Interaction):
-                try:
-                    user = interaction.guild.get_member(int(self.user_id.value))
-                    if not user:
-                        await interaction.response.send_message("❌ User not found!", ephemeral=True)
-                        return
-                    await interaction.channel.set_permissions(user, read_messages=False)
-                    await interaction.response.send_message(f"✅ Removed {user.mention}!", ephemeral=True)
-                except:
-                    await interaction.response.send_message("❌ Invalid user ID!", ephemeral=True)
-
-        class SpecialNoteModal(Modal, title="📝 Special Note"):
-            note = TextInput(label="Note", placeholder="Enter special note for this user", required=True, max_length=500)
-
-            def __init__(self, ticket_id):
-                super().__init__()
-                self.ticket_id = ticket_id
-
-            async def on_submit(self, interaction: discord.Interaction):
-                ticket = db_fetch_one("SELECT user_id, guild_id FROM tickets WHERE ticket_id=?", (self.ticket_id,))
-                if ticket:
-                    firebase_save_special_note(ticket['user_id'], ticket['guild_id'], self.note.value)
-                await interaction.response.send_message("✅ Special note saved!", ephemeral=True)
-
-        @self.tree.command(name="setup_ticket", description="🎫 Setup ticket system (Admin)")
+                    member=await i.guild.fetch_member(int(self.member_id.value)); await i.channel.set_permissions(member,view_channel=self.add,send_messages=self.add); await i.response.send_message(f"✅ {'Added' if self.add else 'Removed'} {member.mention}",ephemeral=True)
+                except Exception as e: await i.response.send_message(f"❌ Could not update member: {e}",ephemeral=True)
+        class SpecialNoteModal(Modal,title="Special Note"):
+            note=TextInput(label="Note",style=discord.TextStyle.paragraph,max_length=1000)
+            def __init__(self,ticket_id): super().__init__(); self.ticket_id=ticket_id
+            async def on_submit(self,i):
+                t=db_fetch_one("SELECT user_id,guild_id FROM tickets WHERE ticket_id=?",(self.ticket_id,))
+                if t: firebase_save_special_note(t['user_id'],t['guild_id'],self.note.value); db_execute("UPDATE tickets SET special_note=? WHERE ticket_id=?",(self.note.value,self.ticket_id))
+                await i.response.send_message("✅ Special note saved.",ephemeral=True)
+        @self.tree.command(name="setup_ticket",description="🎫 Setup a modern ticket panel")
         @app_commands.default_permissions(administrator=True)
-        async def setup_ticket(interaction: discord.Interaction):
-            modal = TicketSetupModal()
-            await interaction.response.send_modal(modal)
-
-        @self.tree.command(name="ticket", description="🎫 Create a ticket")
-        @app_commands.describe(category="Category", reason="Reason")
-        async def ticket(interaction: discord.Interaction, category: str = "General", reason: str = "No reason"):
-            await create_ticket_channel(interaction, category)
-
-        @self.tree.command(name="setticketsupportrole", description="⚙️ Set ticket support role (Admin)")
+        async def setup_ticket(interaction):
+            await interaction.response.send_message("Choose the ticket panel style:",view=TicketTypeView(),ephemeral=True)
+        @self.tree.command(name="ticket",description="🎫 Create a ticket")
+        async def ticket(interaction,category:str="General",reason:str="No reason"):
+            await create_ticket_channel(interaction,category,reason)
+        @self.tree.command(name="setticketsupportrole",description="⚙️ Set ticket support role")
         @app_commands.default_permissions(administrator=True)
-        @app_commands.describe(role="Role for ticket support")
-        async def setticketsupportrole(interaction: discord.Interaction, role: discord.Role):
-            db_execute("INSERT OR REPLACE INTO guild_settings (guild_id, ticket_support_role_id) VALUES (?,?)",
-                       (str(interaction.guild.id), str(role.id)))
-            embed = discord.Embed(title="✅ Ticket Support Role Set", description=f"Set to {role.mention}", color=discord.Color.green())
-            await interaction.response.send_message(embed=embed)
+        async def setticketsupportrole(interaction,role:discord.Role):
+            db_execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)",(str(interaction.guild.id),)); db_execute("UPDATE guild_settings SET ticket_support_role_id=? WHERE guild_id=?",(str(role.id),str(interaction.guild.id))); await interaction.response.send_message(f"✅ Support role set to {role.mention}",ephemeral=True)
 
         # ═════════════════════════════════════════════════════════════════════
         # 4. WELCOME COMMANDS - WITH IMAGE + TEXT OVERLAY
@@ -1750,85 +1595,62 @@ class AnionBot(commands.Bot):
         # 6. SETUP SERVER - FULL GUI
         # ═════════════════════════════════════════════════════════════════════
 
-        class SetupServerModal(Modal, title="⚙️ Setup Server"):
-            log_channel = TextInput(label="📋 Log Channel ID", placeholder="Enter channel ID", required=False)
-            transcript_channel = TextInput(label="📝 Transcript Channel ID", placeholder="Enter channel ID", required=False)
-            anti_nuke = TextInput(label="🛡️ Anti-Nuke", placeholder="yes/no", required=False, default="no")
-            raid_protection = TextInput(label="🛡️ Raid Protection", placeholder="yes/no", required=False, default="no")
-            automod = TextInput(label="🤖 Auto-Mod", placeholder="yes/no", required=False, default="yes")
-            spam_threshold = TextInput(label="📊 Spam Threshold", placeholder="Number of messages (default: 5)", required=False, default="5")
-
-            async def on_submit(self, interaction: discord.Interaction):
-                anti_nuke = self.anti_nuke.value.lower() == 'yes'
-                raid_protection = self.raid_protection.value.lower() == 'yes'
-                automod = self.automod.value.lower() == 'yes'
-                spam_threshold = int(self.spam_threshold.value) if self.spam_threshold.value.isdigit() else 5
-
-                db_execute("""
-                    INSERT OR REPLACE INTO guild_settings (
-                        guild_id, log_channel_id, transcript_channel_id,
-                        anti_nuke, raid_protection, automod_enabled, spam_threshold
-                    ) VALUES (?,?,?,?,?,?,?)
-                """, (
-                    str(interaction.guild.id),
-                    self.log_channel.value or None,
-                    self.transcript_channel.value or None,
-                    anti_nuke, raid_protection, automod, spam_threshold
-                ))
-
-                embed = discord.Embed(
-                    title="✅ Server Setup Complete",
-                    description="All settings have been applied!",
-                    color=discord.Color.green()
-                )
-                embed.add_field(name="🛡️ Anti-Nuke", value="✅ Enabled" if anti_nuke else "❌ Disabled", inline=True)
-                embed.add_field(name="🛡️ Raid Protection", value="✅ Enabled" if raid_protection else "❌ Disabled", inline=True)
-                embed.add_field(name="🤖 Auto-Mod", value="✅ Enabled" if automod else "❌ Disabled", inline=True)
-                await interaction.response.send_message(embed=embed)
-
-        @self.tree.command(name="setup_server", description="⚙️ Setup server with all settings (Admin)")
+        class SetupServerView(View):
+            def __init__(self):
+                super().__init__(timeout=300); self.values={}
+                self.add_item(ChannelSelect(channel_types=[discord.ChannelType.text],placeholder="Select log channel",custom_id="setup_log"))
+                self.add_item(ChannelSelect(channel_types=[discord.ChannelType.text],placeholder="Select transcript channel",custom_id="setup_transcript"))
+                self.add_item(RoleSelect(placeholder="Select verified role",custom_id="setup_verified")); self.add_item(RoleSelect(placeholder="Select unverified role",custom_id="setup_unverified"))
+                for child in self.children:
+                    async def cb(interaction, c=child): self.values[c.custom_id]=c.values[0].id if c.values else None; await interaction.response.defer()
+                    child.callback=cb
+            @discord.ui.button(label="Save Configuration",style=discord.ButtonStyle.success)
+            async def save(self,i,b):
+                db_execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)",(str(i.guild.id),))
+                mapping={'setup_log':'log_channel_id','setup_transcript':'transcript_channel_id','setup_verified':'verified_role_id','setup_unverified':'unverified_role_id'}
+                for k,col in mapping.items():
+                    if k in self.values: db_execute(f"UPDATE guild_settings SET {col}=? WHERE guild_id=?",(str(self.values[k]),str(i.guild.id)))
+                await i.response.send_message("✅ Server configuration saved. You can run `/server_status` to review it.",ephemeral=True)
+        @self.tree.command(name="setup_server",description="⚙️ Configure your server")
         @app_commands.default_permissions(administrator=True)
-        async def setup_server(interaction: discord.Interaction):
-            modal = SetupServerModal()
-            await interaction.response.send_modal(modal)
-
-        # ═════════════════════════════════════════════════════════════════════
-        # 7. SERVER STATUS
-        # ═════════════════════════════════════════════════════════════════════
-
-        @self.tree.command(name="server_status", description="📊 View server configuration status")
-        async def server_status(interaction: discord.Interaction):
-            settings = db_fetch_one("SELECT * FROM guild_settings WHERE guild_id=?", (str(interaction.guild.id),))
-
-            embed = discord.Embed(
-                title=f"📊 Server Status - {interaction.guild.name}",
-                color=discord.Color.blue()
-            )
-
-            if not settings:
-                embed.description = "❌ No settings configured! Use `/setup_server` to get started."
-                await interaction.response.send_message(embed=embed)
-                return
-
-            status = [
-                ("✅" if settings['verified_role_id'] else "❌", "Verified Role", settings['verified_role_id'] or "Not set"),
-                ("✅" if settings['unverified_role_id'] else "❌", "Unverified Role", settings['unverified_role_id'] or "Not set"),
-                ("✅" if settings['log_channel_id'] else "❌", "Log Channel", f"<#{settings['log_channel_id']}>" if settings['log_channel_id'] else "Not set"),
-                ("✅" if settings['welcome_channel_id'] else "❌", "Welcome Channel", f"<#{settings['welcome_channel_id']}>" if settings['welcome_channel_id'] else "Not set"),
-                ("✅" if settings['goodbye_channel_id'] else "❌", "Goodbye Channel", f"<#{settings['goodbye_channel_id']}>" if settings['goodbye_channel_id'] else "Not set"),
-                ("✅" if settings['anti_nuke'] else "❌", "Anti-Nuke", "Enabled" if settings['anti_nuke'] else "Disabled"),
-                ("✅" if settings['raid_protection'] else "❌", "Raid Protection", "Enabled" if settings['raid_protection'] else "Disabled"),
-                ("✅" if settings['automod_enabled'] else "❌", "Auto-Mod", "Enabled" if settings['automod_enabled'] else "Disabled"),
-            ]
-
-            for icon, name, value in status:
-                embed.add_field(name=f"{icon} {name}", value=value, inline=True)
-
-            await interaction.response.send_message(embed=embed)
+        async def setup_server(interaction): await interaction.response.send_message("Configure channels and roles, then press **Save Configuration**.",view=SetupServerView(),ephemeral=True)
+        @self.tree.command(name="server_status",description="📊 View server configuration status")
+        async def server_status(interaction):
+            settings=db_fetch_one("SELECT * FROM guild_settings WHERE guild_id=?",(str(interaction.guild.id),))
+            e=discord.Embed(title=f"📊 {interaction.guild.name} • Configuration",color=discord.Color.blurple())
+            if not settings: e.description="No settings configured yet. Run `/setup_server`."; return await interaction.response.send_message(embed=e,ephemeral=True)
+            fields=[('Verified Role','verified_role_id'),('Unverified Role','unverified_role_id'),('Log Channel','log_channel_id'),('Transcript Channel','transcript_channel_id'),('Welcome Channel','welcome_channel_id'),('Goodbye Channel','goodbye_channel_id')]
+            for label,key in fields:
+                v=settings[key]; e.add_field(name=label,value=(f"✅ <@&{v}>" if 'Role' in label and v else f"✅ <#{v}>" if v else '❌ Not configured'),inline=True)
+            e.add_field(name='Anti-Nuke',value='🟢 Enabled' if settings['anti_nuke'] else '⚪ Disabled'); e.add_field(name='Raid Protection',value='🟢 Enabled' if settings['raid_protection'] else '⚪ Disabled'); e.add_field(name='Auto-Mod',value='🟢 Enabled' if settings['automod_enabled'] else '⚪ Disabled')
+            await interaction.response.send_message(embed=e,ephemeral=True)
 
         # ═════════════════════════════════════════════════════════════════════
         # 8. MODERATION - FULL GUI
         # ═════════════════════════════════════════════════════════════════════
+
+        class ModerationActionModal(Modal,title="Moderation Action"):
+            target=TextInput(label="User ID (leave blank for channel lock/unlock)",required=False)
+            duration=TextInput(label="Duration for timeout (e.g. 10m)",required=False)
+            reason=TextInput(label="Reason",required=False,max_length=300)
+            def __init__(self,action): super().__init__(); self.action=action; self.title=f"{action.title()} • Moderation"
+            async def on_submit(self,i):
+                try:
+                    if self.action in ('lock','unlock'):
+                        await i.channel.set_permissions(i.guild.default_role,send_messages=(self.action=='unlock')); return await i.response.send_message(f"✅ Channel {self.action}ed.",ephemeral=True)
+                    member=await i.guild.fetch_member(int(self.target.value)); reason=self.reason.value or 'No reason provided'
+                    if self.action=='kick': await member.kick(reason=reason)
+                    elif self.action=='ban': await member.ban(reason=reason)
+                    elif self.action=='timeout':
+                        m=re.fullmatch(r'\s*(\d+)\s*([smhd])\s*',self.duration.value or '')
+                        if not m: return await i.response.send_message('❌ Timeout format: 10m, 2h, 1d.',ephemeral=True)
+                        sec=int(m.group(1))*{'s':1,'m':60,'h':3600,'d':86400}[m.group(2)]; await member.timeout(timedelta(seconds=sec),reason=reason)
+                    elif self.action=='mute': await member.edit(mute=True,reason=reason)
+                    elif self.action=='unmute': await member.edit(mute=False,reason=reason)
+                    elif self.action=='deafen': await member.edit(deafen=True,reason=reason)
+                    else: return await i.response.send_message(f"⚠️ {self.action} is handled by the dedicated command.",ephemeral=True)
+                    await i.response.send_message(f"✅ {self.action.title()} completed for {member.mention}.",ephemeral=True)
+                except Exception as e: await i.response.send_message(f"❌ Moderation failed: {e}",ephemeral=True)
 
         class ModActionSelect(View):
             def __init__(self, guild):
@@ -1855,8 +1677,7 @@ class AnionBot(commands.Bot):
 
             async def select_callback(self, interaction: discord.Interaction):
                 action = interaction.data['values'][0]
-                # For now, we'll handle this with a follow-up
-                await interaction.response.send_message(f"Selected: {action}. Please use the command with parameters.", ephemeral=True)
+                await interaction.response.send_modal(ModerationActionModal(action))
 
         @self.tree.command(name="mod", description="🛡️ Open moderation panel (Admin)")
         @app_commands.default_permissions(administrator=True)
@@ -2103,6 +1924,19 @@ class AnionBot(commands.Bot):
                 except:
                     await interaction.response.send_message("❌ Could not send DM!", ephemeral=True)
 
+        class OPFunView(View):
+            def __init__(self): super().__init__(timeout=180)
+            @discord.ui.button(label="DM All",emoji="📨",style=discord.ButtonStyle.primary)
+            async def all_dm(self,i,b):
+                if not i.user.guild_permissions.administrator: return await i.response.send_message('Admins only.',ephemeral=True)
+                await i.response.send_modal(DmAllModal())
+            @discord.ui.button(label="Create Embed",emoji="📊",style=discord.ButtonStyle.success)
+            async def emb(self,i,b): await i.response.send_modal(EmbedModal())
+            @discord.ui.button(label="Announcement",emoji="📢",style=discord.ButtonStyle.danger)
+            async def ann(self,i,b): await i.response.send_modal(AnnouncementModal())
+            @discord.ui.button(label="DM User",emoji="👤",style=discord.ButtonStyle.secondary)
+            async def dm(self,i,b): await i.response.send_modal(DmUserModal())
+
         @self.tree.command(name="opfun", description="🎯 Open OP Fun Panel")
         async def opfun(interaction: discord.Interaction):
             embed = discord.Embed(
@@ -2112,11 +1946,7 @@ class AnionBot(commands.Bot):
             )
             embed.add_field(name="📋 Available Actions", value="• DM All Members\n• Create Embed\n• Send Announcement\n• DM Individual User", inline=False)
 
-            view = View()
-            view.add_item(Button(label="📨 DM All", style=discord.ButtonStyle.primary, custom_id="dm_all"))
-            view.add_item(Button(label="📊 Embed", style=discord.ButtonStyle.success, custom_id="create_embed"))
-            view.add_item(Button(label="📢 Announce", style=discord.ButtonStyle.danger, custom_id="send_announce"))
-            view.add_item(Button(label="📨 DM User", style=discord.ButtonStyle.secondary, custom_id="dm_user"))
+            view = OPFunView()
 
             await interaction.response.send_message(embed=embed, view=view)
 
@@ -2377,39 +2207,13 @@ class AnionBot(commands.Bot):
         print("📋 ALL FEATURES LOADED!")
         print("═" * 70)
 
-    async def _sync_member_role_level(self, member):
-        """Keep stored credential level synchronized with Discord permissions."""
-        level = 'admin' if member.guild_permissions.administrator else ('moderator' if member.guild_permissions.manage_messages or member.guild_permissions.moderate_members else 'user')
-        row = db_fetch_one("SELECT username, password FROM user_passwords WHERE user_id=? AND guild_id=?", (str(member.id), str(member.guild.id)))
-        if row:
-            db_execute("UPDATE user_passwords SET role_level=?, updated_at=? WHERE user_id=? AND guild_id=?", (level, datetime.now().isoformat(), str(member.id), str(member.guild.id)))
-            firebase_save_password(str(member.id), str(member.guild.id), {'username': row['username'], 'password': row['password'], 'role_level': level, 'user_id': str(member.id), 'updated_at': datetime.now().isoformat()})
-        return level
-
-    async def _generate_user_password_safe(self, member, guild_id):
-        """Member-event safe credential generator (the original local helper was not visible here)."""
-        username = f"user_{member.id}_{random.randint(100,999)}"
-        password = secrets.token_urlsafe(12)
-        level = 'admin' if member.guild_permissions.administrator else ('moderator' if member.guild_permissions.manage_messages or member.guild_permissions.moderate_members else 'user')
-        db_execute("INSERT OR REPLACE INTO user_passwords (user_id, guild_id, username, password, role_level) VALUES (?,?,?,?,?)", (str(member.id), str(guild_id), username, password, level))
-        firebase_save_password(str(member.id), str(guild_id), {'username': username, 'password': password, 'role_level': level, 'user_id': str(member.id), 'updated_at': datetime.now().isoformat()})
-        try:
-            embed = discord.Embed(title="🔐 Your Account Credentials", description=f"**Username:** `{username}`\n**Password:** `{password}`", color=discord.Color.blue())
-            embed.add_field(name="Role level", value=level.title(), inline=True)
-            await member.send(embed=embed)
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-        return username, password
-
     async def on_member_join(self, member):
         settings = db_fetch_one("SELECT welcome_channel_id, welcome_message, welcome_image FROM guild_settings WHERE guild_id=?", (str(member.guild.id),))
         if settings and settings['welcome_channel_id']:
             channel = member.guild.get_channel(int(settings['welcome_channel_id']))
             if channel:
                 msg = settings['welcome_message'] or "👋 Welcome {mention} to **{server}**!"
-                msg = (msg.replace("{mention}", member.mention)
-                          .replace("{user}", member.display_name)
-                          .replace("{server}", member.guild.name))
+                msg = msg.replace("{mention}", member.mention).replace("{user}", member.display_name).replace("{server}", member.guild.name)
 
                 embed = discord.Embed(
                     title="👋 Welcome to the Server!",
@@ -2425,8 +2229,8 @@ class AnionBot(commands.Bot):
 
                 await channel.send(embed=embed)
 
-        # Generate credentials safely from the member event.
-        await self._generate_user_password_safe(member, str(member.guild.id))
+        # Generate password
+        await generate_user_password(member, str(member.guild.id))
 
         # Assign unverified role
         settings2 = db_fetch_one("SELECT unverified_role_id FROM guild_settings WHERE guild_id=?", (str(member.guild.id),))
@@ -2434,14 +2238,6 @@ class AnionBot(commands.Bot):
             role = member.guild.get_role(int(settings2['unverified_role_id']))
             if role:
                 await member.add_roles(role)
-
-    async def on_member_update(self, before, after):
-        if before.guild.id != after.guild.id or before.roles == after.roles:
-            return
-        try:
-            await self._sync_member_role_level(after)
-        except Exception as exc:
-            print(f"Role-level sync error for {after.id}: {exc}")
 
     async def on_member_remove(self, member):
         settings = db_fetch_one("SELECT goodbye_channel_id, goodbye_message, goodbye_image FROM guild_settings WHERE guild_id=?", (str(member.guild.id),))
