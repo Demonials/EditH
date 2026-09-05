@@ -900,6 +900,12 @@ class AnionBot(commands.Bot):
 
     async def setup_hook(self):
         await self.register_commands()
+        # Reconcile giveaway state after restarts so stale rows do not remain open forever.
+        try:
+            now = datetime.now().isoformat()
+            db_execute("UPDATE giveaways SET ended=1 WHERE ended=0 AND ended_at IS NOT NULL AND ended_at<=?", (now,))
+        except Exception as exc:
+            print(f"Giveaway startup reconciliation error: {exc}")
         await self.tree.sync()
         print('✅ All commands synced!')
 
@@ -1061,8 +1067,6 @@ class AnionBot(commands.Bot):
                         select.callback = self.select_callback
                         self.add_item(select)
 
-                        # Image URL input
-                        self.add_item(Button(label="🖼️ Set Image URL", style=discord.ButtonStyle.secondary, custom_id="set_image"))
 
                     async def select_callback(self, select_interaction: discord.Interaction):
                         self.role = select_interaction.data['values'][0]
@@ -1092,10 +1096,9 @@ class AnionBot(commands.Bot):
                         )
                         if self.description:
                             embed.add_field(name="📝 Description", value=self.description, inline=False)
-                        if self.image_url:
-                            embed.set_image(url=self.image_url)
-                        else:
-                            embed.set_thumbnail(url=self.guild.me.display_avatar.url)
+                        # Banner-style image: custom image, otherwise bot logo as the banner.
+                        banner_url = self.image_url or str(self.guild.me.display_avatar.url)
+                        embed.set_image(url=banner_url)
 
                         embed.set_footer(text=f"Hosted by {button_interaction.user.display_name}")
 
@@ -1160,11 +1163,14 @@ class AnionBot(commands.Bot):
                     await interaction.followup.send("❌ This giveaway has ended!", ephemeral=True)
                     return
 
-                db_execute("INSERT OR IGNORE INTO giveaway_participants (giveaway_id, user_id) VALUES (?,?)",
-                          (self.giveaway_id, str(interaction.user.id)))
-                db_execute("UPDATE giveaways SET participant_count = participant_count + 1 WHERE id=?", (self.giveaway_id,))
-
-                await interaction.followup.send("✅ You've joined the giveaway! Good luck! 🍀", ephemeral=True)
+                cursor = db_execute("INSERT OR IGNORE INTO giveaway_participants (giveaway_id, user_id) VALUES (?,?)",
+                                    (self.giveaway_id, str(interaction.user.id)))
+                if cursor.rowcount:
+                    db_execute("UPDATE giveaways SET participant_count = participant_count + 1 WHERE id=?", (self.giveaway_id,))
+                    text = "✅ You've joined the giveaway! Good luck! 🍀"
+                else:
+                    text = "ℹ️ You are already participating in this giveaway."
+                await interaction.followup.send(text, ephemeral=True)
 
             @discord.ui.button(label="❌ Leave Giveaway", style=discord.ButtonStyle.danger, custom_id="leave_giveaway", row=0)
             async def leave_giveaway(self, interaction: discord.Interaction, button: Button):
@@ -1174,8 +1180,13 @@ class AnionBot(commands.Bot):
                     await interaction.followup.send("❌ Giveaway not found!", ephemeral=True)
                     return
 
-                db_execute("DELETE FROM giveaway_participants WHERE giveaway_id=? AND user_id=?", (self.giveaway_id, str(interaction.user.id)))
-                await interaction.followup.send("✅ You've left the giveaway.", ephemeral=True)
+                cursor = db_execute("DELETE FROM giveaway_participants WHERE giveaway_id=? AND user_id=?", (self.giveaway_id, str(interaction.user.id)))
+                if cursor.rowcount:
+                    db_execute("UPDATE giveaways SET participant_count = MAX(0, participant_count - 1) WHERE id=?", (self.giveaway_id,))
+                    text = "✅ You've left the giveaway."
+                else:
+                    text = "ℹ️ You were not participating in this giveaway."
+                await interaction.followup.send(text, ephemeral=True)
 
             @discord.ui.button(label="👥 See Participants", style=discord.ButtonStyle.secondary, custom_id="see_participants", row=0)
             async def see_participants(self, interaction: discord.Interaction, button: Button):
@@ -2354,7 +2365,6 @@ class AnionBot(commands.Bot):
             await interaction.response.send_message(embed=embed)
 
     async def on_ready(self):
-        # Preservation-first build: all original command registrations remain intact.
         print("╔══════════════════════════════════════════════════════════════════╗")
         print("║              ✅✅✅ BOT IS ONLINE! ✅✅✅                           ║")
         print("╚══════════════════════════════════════════════════════════════════╝")
@@ -2367,13 +2377,39 @@ class AnionBot(commands.Bot):
         print("📋 ALL FEATURES LOADED!")
         print("═" * 70)
 
+    async def _sync_member_role_level(self, member):
+        """Keep stored credential level synchronized with Discord permissions."""
+        level = 'admin' if member.guild_permissions.administrator else ('moderator' if member.guild_permissions.manage_messages or member.guild_permissions.moderate_members else 'user')
+        row = db_fetch_one("SELECT username, password FROM user_passwords WHERE user_id=? AND guild_id=?", (str(member.id), str(member.guild.id)))
+        if row:
+            db_execute("UPDATE user_passwords SET role_level=?, updated_at=? WHERE user_id=? AND guild_id=?", (level, datetime.now().isoformat(), str(member.id), str(member.guild.id)))
+            firebase_save_password(str(member.id), str(member.guild.id), {'username': row['username'], 'password': row['password'], 'role_level': level, 'user_id': str(member.id), 'updated_at': datetime.now().isoformat()})
+        return level
+
+    async def _generate_user_password_safe(self, member, guild_id):
+        """Member-event safe credential generator (the original local helper was not visible here)."""
+        username = f"user_{member.id}_{random.randint(100,999)}"
+        password = secrets.token_urlsafe(12)
+        level = 'admin' if member.guild_permissions.administrator else ('moderator' if member.guild_permissions.manage_messages or member.guild_permissions.moderate_members else 'user')
+        db_execute("INSERT OR REPLACE INTO user_passwords (user_id, guild_id, username, password, role_level) VALUES (?,?,?,?,?)", (str(member.id), str(guild_id), username, password, level))
+        firebase_save_password(str(member.id), str(guild_id), {'username': username, 'password': password, 'role_level': level, 'user_id': str(member.id), 'updated_at': datetime.now().isoformat()})
+        try:
+            embed = discord.Embed(title="🔐 Your Account Credentials", description=f"**Username:** `{username}`\n**Password:** `{password}`", color=discord.Color.blue())
+            embed.add_field(name="Role level", value=level.title(), inline=True)
+            await member.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        return username, password
+
     async def on_member_join(self, member):
         settings = db_fetch_one("SELECT welcome_channel_id, welcome_message, welcome_image FROM guild_settings WHERE guild_id=?", (str(member.guild.id),))
         if settings and settings['welcome_channel_id']:
             channel = member.guild.get_channel(int(settings['welcome_channel_id']))
             if channel:
                 msg = settings['welcome_message'] or "👋 Welcome {mention} to **{server}**!"
-                msg = msg.replace("{mention}", member.mention).replace("{user}", member.display_name).replace("{server}", member.guild.name)
+                msg = (msg.replace("{mention}", member.mention)
+                          .replace("{user}", member.display_name)
+                          .replace("{server}", member.guild.name))
 
                 embed = discord.Embed(
                     title="👋 Welcome to the Server!",
@@ -2389,8 +2425,8 @@ class AnionBot(commands.Bot):
 
                 await channel.send(embed=embed)
 
-        # Generate password
-        await generate_user_password(member, str(member.guild.id))
+        # Generate credentials safely from the member event.
+        await self._generate_user_password_safe(member, str(member.guild.id))
 
         # Assign unverified role
         settings2 = db_fetch_one("SELECT unverified_role_id FROM guild_settings WHERE guild_id=?", (str(member.guild.id),))
@@ -2398,6 +2434,14 @@ class AnionBot(commands.Bot):
             role = member.guild.get_role(int(settings2['unverified_role_id']))
             if role:
                 await member.add_roles(role)
+
+    async def on_member_update(self, before, after):
+        if before.guild.id != after.guild.id or before.roles == after.roles:
+            return
+        try:
+            await self._sync_member_role_level(after)
+        except Exception as exc:
+            print(f"Role-level sync error for {after.id}: {exc}")
 
     async def on_member_remove(self, member):
         settings = db_fetch_one("SELECT goodbye_channel_id, goodbye_message, goodbye_image FROM guild_settings WHERE guild_id=?", (str(member.guild.id),))
