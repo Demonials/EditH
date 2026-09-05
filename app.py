@@ -950,7 +950,7 @@ class AnionBot(commands.Bot):
             embed = discord.Embed(title="✅ Purchase Complete", description=f"Bought **{item}**", color=discord.Color.green())
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="daily", description="🎁 Claim your daily bonus")
+        @self.tree.command(name="pokemon-daily", description="🎁 Claim your daily Pokémon bonus")
         async def daily(interaction: discord.Interaction):
             embed = discord.Embed(title="🎁 Daily Bonus", description="✨ You received **150** coins!", color=discord.Color.gold())
             await interaction.response.send_message(embed=embed)
