@@ -35,20 +35,30 @@ logger.info("="*60)
 load_dotenv()
 logger.info("📝 Environment loaded")
 
-# ============ TRY TO IMPORT FLASK (with error handling) ============
+# ============ FLASK IMPORTS ============
 try:
-    from flask import Flask, request, redirect, jsonify
+    from flask import Flask, request, redirect, jsonify, session
+    from flask_cors import CORS
+    from flask_session import Session
     FLASK_AVAILABLE = True
     logger.info("✅ Flask imported successfully!")
 except ImportError as e:
     FLASK_AVAILABLE = False
     logger.warning(f"⚠️ Flask not available: {e}")
-    logger.warning("⚠️ Web server will not start")
 
-# ============ FLASK APP (only if available) ============
+# ============ FLASK APP ============
 if FLASK_AVAILABLE:
     app = Flask(__name__)
     app.secret_key = secrets.token_hex(32)
+    app.config['SESSION_TYPE'] = 'filesystem'
+    app.config['SESSION_PERMANENT'] = False
+    app.config['SESSION_USE_SIGNER'] = True
+    app.config['SESSION_COOKIE_SECURE'] = True
+    app.config['SESSION_COOKIE_HTTPONLY'] = True
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+    
+    CORS(app, origins=['https://edith-bot.up.railway.app', 'http://localhost:3000'])
+    Session(app)
 
     @app.route('/')
     def home():
@@ -108,21 +118,18 @@ if FLASK_AVAILABLE:
                 return "<h1>No code provided</h1><p>Please try /verify again in Discord.</p>", 400
             
             # Get session
-            session = None
+            session_data = None
             if state:
-                session = oauth_states.pop(state, None)
+                session_data = oauth_states.pop(state, None)
             
-            if not session:
+            if not session_data:
                 return "<h1>Session expired</h1><p>Please run /verify again in Discord.</p>"
             
-            user_id = session['user_id']
-            guild_id = session['guild_id']
+            user_id = session_data['user_id']
+            guild_id = session_data['guild_id']
             logger.info(f"   User ID: {user_id}, Guild ID: {guild_id}")
             
             # Exchange code for token
-            import aiohttp
-            import asyncio
-            
             async def exchange_code():
                 data = {
                     'client_id': os.getenv('CLIENT_ID'),
@@ -235,19 +242,30 @@ if FLASK_AVAILABLE:
 
     @app.route('/health')
     def health():
-        return jsonify({'status': 'online', 'bot': bot.user.name if bot.user else 'None', 'guilds': len(bot.guilds)})
+        return jsonify({
+            'status': 'online',
+            'bot': bot.user.name if bot.user else 'None',
+            'guilds': len(bot.guilds),
+            'timestamp': datetime.now().isoformat()
+        })
 
     @app.route('/test')
     def test():
-        return jsonify({'message': 'Web server is running!', 'redirect_uri': os.getenv('REDIRECT_URI')})
+        return jsonify({
+            'message': 'Web server is running!',
+            'redirect_uri': os.getenv('REDIRECT_URI'),
+            'client_id': os.getenv('CLIENT_ID', 'Not set')
+        })
 
 # ============ DISCORD BOT ============
 try:
     import firebase_admin
     from firebase_admin import credentials, firestore
     FIREBASE_AVAILABLE = True
-except ImportError:
+    logger.info("✅ Firebase module loaded successfully!")
+except ImportError as e:
     FIREBASE_AVAILABLE = False
+    logger.warning(f"⚠️ Firebase not available: {e}")
     firebase_admin = None
     credentials = None
     firestore = None
@@ -261,12 +279,15 @@ if FIREBASE_AVAILABLE:
             cred = credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred)
             db_firebase = firestore.client()
-            logger.info("✅ Firebase connected!")
+            logger.info("✅ Firebase connected successfully!")
+        else:
+            logger.warning("⚠️ No Firebase credentials found")
     except Exception as e:
         logger.error(f"❌ Firebase error: {e}")
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='!', intents=intents)
+logger.info("🤖 Bot initialized")
 
 class SimpleDB:
     def __init__(self):
@@ -278,10 +299,13 @@ class SimpleDB:
             if os.path.exists('./data/db.json'):
                 with open('./data/db.json', 'r') as f:
                     self.data = json.load(f)
+                logger.info("✅ Local database loaded")
             else:
                 self.data = {'users': {}, 'guilds': {}, 'giveaways': {}, 'tickets': {}, 'notes': {}, 'oauth_states': {}}
                 self.save_data()
-        except:
+                logger.info("📂 New local database created")
+        except Exception as e:
+            logger.error(f"❌ Failed to load database: {e}")
             self.data = {'users': {}, 'guilds': {}, 'giveaways': {}, 'tickets': {}, 'notes': {}, 'oauth_states': {}}
             self.save_data()
     
@@ -290,8 +314,8 @@ class SimpleDB:
             os.makedirs('./data', exist_ok=True)
             with open('./data/db.json', 'w') as f:
                 json.dump(self.data, f, indent=2)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"❌ Failed to save database: {e}")
     
     def get_user(self, user_id, guild_id):
         user_id = str(user_id)
@@ -335,6 +359,8 @@ class OAuthVerification:
         self.client_id = os.getenv('CLIENT_ID')
         self.client_secret = os.getenv('CLIENT_SECRET')
         self.redirect_uri = os.getenv('REDIRECT_URI', 'https://edith-bot.up.railway.app/callback')
+        logger.info(f"🔐 OAuth initialized")
+        logger.info(f"   Redirect URI: {self.redirect_uri}")
     
     def generate_oauth_url(self, user_id, guild_id):
         state = secrets.token_urlsafe(32)
@@ -343,6 +369,18 @@ class OAuthVerification:
             'guild_id': guild_id,
             'timestamp': datetime.now().isoformat()
         }
+        
+        if db_firebase:
+            try:
+                doc_ref = db_firebase.collection('oauth_states').document(state)
+                doc_ref.set({
+                    'user_id': user_id,
+                    'guild_id': guild_id,
+                    'timestamp': datetime.now().isoformat()
+                })
+            except Exception as e:
+                logger.error(f"Failed to store in Firebase: {e}")
+        
         url = (f"https://discord.com/api/oauth2/authorize?"
                f"client_id={self.client_id}&"
                f"redirect_uri={self.redirect_uri}&"
@@ -1015,6 +1053,7 @@ async def on_ready():
     ║ Name: {bot.user.name}                  ║
     ║ ID: {bot.user.id}                      ║
     ║ Guilds: {len(bot.guilds)}              ║
+    ║ Web Server: {'✅ Running' if FLASK_AVAILABLE else '⚠️ Not running'} ║
     ╚════════════════════════════════════════╝
     """)
     
@@ -1029,6 +1068,7 @@ async def on_ready():
 # ============ FLASK THREAD ============
 if FLASK_AVAILABLE:
     import threading
+    import time
     flask_thread = None
 
     def run_flask():
@@ -1049,6 +1089,8 @@ if __name__ == "__main__":
         flask_thread.start()
         time.sleep(2)
         logger.info("🌐 Web server started")
+    else:
+        logger.warning("⚠️ Flask not available - web server not running")
     
     print("🚀 Starting EDITH Bot...")
     bot.run(token)
