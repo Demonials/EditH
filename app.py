@@ -12,7 +12,7 @@ import aiohttp
 import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from flask import Flask, request, redirect, jsonify
+from flask import Flask, request, redirect, jsonify, render_template_string
 import threading
 import time
 import string
@@ -351,7 +351,7 @@ async def auto_sync():
     except Exception as e:
         logger.error(f"Auto sync error: {e}")
 
-# ============ BIG SETUP VIEW ============
+# ============ SETUP VIEW ============
 class SetupView(View):
     def __init__(self, author):
         super().__init__(timeout=300)
@@ -496,12 +496,19 @@ class SetupView(View):
     
     async def setup_all(self, guild, interaction):
         try:
-            await interaction.followup.send("🔄 **STEP 1/6:** DELETING existing channels...", ephemeral=True)
-            logger.info("🗑️ DELETING all channels...")
+            # Get the channel where command was run (keep this one)
+            command_channel = interaction.channel
+            command_channel_name = command_channel.name
             
-            # DELETE ALL EXISTING CHANNELS
+            await interaction.followup.send("🔄 **STEP 1/6:** DELETING existing channels (keeping this one)...", ephemeral=True)
+            logger.info("🗑️ DELETING all channels except command channel...")
+            
+            # DELETE ALL EXISTING CHANNELS EXCEPT THE COMMAND CHANNEL
             channel_count = 0
             for channel in guild.channels:
+                if channel.id == command_channel.id:
+                    logger.info(f"ℹ️ Keeping command channel: {channel.name}")
+                    continue
                 try:
                     await channel.delete()
                     channel_count += 1
@@ -1470,6 +1477,288 @@ def home():
     </body>
     </html>
     """
+
+@app.route('/callback')
+def oauth_callback():
+    try:
+        code = request.args.get('code')
+        state = request.args.get('state')
+        error = request.args.get('error')
+        
+        logger.info(f"📥 OAuth Callback received!")
+        logger.info(f"   Code: {code[:20] if code else 'None'}...")
+        logger.info(f"   State: {state[:20] if state else 'None'}...")
+        
+        if error:
+            return f"""
+            <html>
+            <head><title>Verification Failed</title>
+            <style>
+                body {{ font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; }}
+                .container {{ background: #2d2d44; padding: 40px; border-radius: 20px; text-align: center; }}
+                .error {{ color: #f44336; font-size: 60px; }}
+            </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="error">❌</div>
+                    <h1>Verification Failed</h1>
+                    <p>Error: {error}</p>
+                    <p>Please try <code>/verify</code> again in Discord.</p>
+                </div>
+            </body>
+            </html>
+            """
+        
+        if not code:
+            return """
+            <html>
+            <head><title>Verification Failed</title>
+            <style>
+                body { font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; }
+                .container { background: #2d2d44; padding: 40px; border-radius: 20px; text-align: center; }
+                .error { color: #f44336; font-size: 60px; }
+            </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="error">❌</div>
+                    <h1>No Code Provided</h1>
+                    <p>Please try <code>/verify</code> again in Discord.</p>
+                </div>
+            </body>
+            </html>
+            """, 400
+        
+        # Get session data from state
+        session = None
+        if state:
+            session = oauth_states.pop(state, None)
+            logger.info(f"   Session found: {session is not None}")
+        
+        if not session:
+            return """
+            <html>
+            <head><title>Verification Failed</title>
+            <style>
+                body { font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; }
+                .container { background: #2d2d44; padding: 40px; border-radius: 20px; text-align: center; }
+                .error { color: #f44336; font-size: 60px; }
+            </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="error">❌</div>
+                    <h1>Session Expired</h1>
+                    <p>Your verification session has expired.</p>
+                    <p>Please run <code>/verify</code> again in Discord.</p>
+                </div>
+            </body>
+            </html>
+            """
+        
+        user_id = session['user_id']
+        guild_id = session['guild_id']
+        logger.info(f"   User ID: {user_id}, Guild ID: {guild_id}")
+        
+        # Exchange code for token
+        import aiohttp
+        import asyncio
+        
+        async def exchange_code():
+            data = {
+                'client_id': os.getenv('CLIENT_ID'),
+                'client_secret': os.getenv('CLIENT_SECRET'),
+                'grant_type': 'authorization_code',
+                'code': code,
+                'redirect_uri': os.getenv('REDIRECT_URI', 'https://edith-bot.up.railway.app/callback')
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post('https://discord.com/api/oauth2/token', data=data) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    return None
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        token_data = loop.run_until_complete(exchange_code())
+        loop.close()
+        
+        if not token_data:
+            return """
+            <html>
+            <head><title>Token Exchange Failed</title>
+            <style>
+                body { font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; }
+                .container { background: #2d2d44; padding: 40px; border-radius: 20px; text-align: center; }
+                .error { color: #f44336; font-size: 60px; }
+            </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="error">❌</div>
+                    <h1>Token Exchange Failed</h1>
+                    <p>Please try <code>/verify</code> again.</p>
+                </div>
+            </body>
+            </html>
+            """
+        
+        access_token = token_data.get('access_token')
+        
+        async def get_user_data():
+            headers = {'Authorization': f'Bearer {access_token}'}
+            async with aiohttp.ClientSession() as session:
+                async with session.get('https://discord.com/api/users/@me', headers=headers) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    return None
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        user_data = loop.run_until_complete(get_user_data())
+        loop.close()
+        
+        if not user_data:
+            return """
+            <html>
+            <head><title>Failed to Get User Data</title>
+            <style>
+                body { font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; }
+                .container { background: #2d2d44; padding: 40px; border-radius: 20px; text-align: center; }
+                .error { color: #f44336; font-size: 60px; }
+            </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="error">❌</div>
+                    <h1>Failed to Get User Data</h1>
+                    <p>Please try <code>/verify</code> again.</p>
+                </div>
+            </body>
+            </html>
+            """
+        
+        username = user_data.get('username')
+        discord_id = user_data.get('id')
+        email = user_data.get('email', 'Not provided')
+        
+        logger.info(f"✅ User verified: {username} ({discord_id})")
+        
+        # Store in Firebase
+        user_data_db = db.get_user(discord_id, guild_id)
+        user_data_db['verified'] = True
+        user_data_db['profile'] = {
+            'discord_id': discord_id,
+            'username': username,
+            'email': email,
+            'verified_at': datetime.now().isoformat(),
+            'guild_id': guild_id
+        }
+        db.set_user(discord_id, guild_id, user_data_db)
+        
+        # Store in Firebase Realtime DB
+        firebase_success = False
+        if rtdb_client:
+            try:
+                guild = bot.get_guild(int(guild_id))
+                guild_name = guild.name if guild else 'Unknown'
+                
+                firebase_set(f'guilds/{guild_id}/verified/{discord_id}', {
+                    'discord_id': discord_id,
+                    'username': username,
+                    'email': email,
+                    'guild_id': guild_id,
+                    'guild_name': guild_name,
+                    'verified_at': datetime.now().isoformat(),
+                    'verified': True
+                })
+                firebase_success = True
+                logger.info(f"✅ Stored in Firebase: {username}")
+            except Exception as e:
+                logger.error(f"❌ Firebase storage failed: {e}")
+        
+        # Assign role
+        guild = bot.get_guild(int(guild_id))
+        role_assigned = False
+        if guild:
+            member = guild.get_member(int(discord_id))
+            if member:
+                verified_role = discord.utils.get(guild.roles, name="✅ Verified")
+                unverified_role = discord.utils.get(guild.roles, name="❌ Unverified")
+                if verified_role:
+                    try:
+                        if unverified_role and unverified_role in member.roles:
+                            asyncio.run_coroutine_threadsafe(member.remove_roles(unverified_role), bot.loop)
+                        asyncio.run_coroutine_threadsafe(member.add_roles(verified_role), bot.loop)
+                        role_assigned = True
+                        logger.info(f"✅ Role assigned to {username}")
+                    except Exception as e:
+                        logger.error(f"Failed to assign role: {e}")
+        
+        return f"""
+        <html>
+        <head>
+            <title>Verification Successful</title>
+            <style>
+                * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+                body {{ font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }}
+                .container {{ background: #2d2d44; padding: 40px; border-radius: 20px; max-width: 500px; width: 100%; }}
+                .success {{ color: #4caf50; font-size: 80px; text-align: center; }}
+                h1 {{ text-align: center; margin: 10px 0; }}
+                .info {{ background: #1e1e32; padding: 15px; border-radius: 10px; margin: 20px 0; }}
+                .info div {{ padding: 8px 0; border-bottom: 1px solid #2d2d44; display: flex; justify-content: space-between; }}
+                .info div:last-child {{ border-bottom: none; }}
+                .label {{ color: #888; }}
+                .value {{ color: white; }}
+                .button {{ background: #5865f2; color: white; border: none; padding: 15px; border-radius: 10px; font-size: 16px; cursor: pointer; text-decoration: none; display: block; text-align: center; margin-top: 20px; }}
+                .button:hover {{ background: #4752c4; }}
+                .footer {{ text-align: center; color: #666; font-size: 12px; margin-top: 20px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="success">✅</div>
+                <h1>Verification Successful!</h1>
+                <p style="text-align: center;">Welcome to the server! 🎉</p>
+                
+                <div class="info">
+                    <div><span class="label">👤 Username</span> <span class="value">{username}</span></div>
+                    <div><span class="label">🆔 ID</span> <span class="value">{discord_id}</span></div>
+                    <div><span class="label">📧 Email</span> <span class="value">{email}</span></div>
+                    <div><span class="label">🎭 Role</span> <span class="value">{'✅ Assigned' if role_assigned else '⚠️ Pending'}</span></div>
+                    <div><span class="label">📦 Firebase</span> <span class="value">{'✅ Stored' if firebase_success else '⚠️ Local only'}</span></div>
+                </div>
+                
+                <a href="https://discord.com/app" class="button">Return to Discord</a>
+                
+                <p class="footer">A verification DM has been sent to you! 📨</p>
+            </div>
+        </body>
+        </html>
+        """
+    
+    except Exception as e:
+        logger.error(f"❌ Callback error: {e}")
+        return f"""
+        <html>
+        <head><title>Verification Error</title>
+        <style>
+            body {{ font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; }}
+            .container {{ background: #2d2d44; padding: 40px; border-radius: 20px; text-align: center; }}
+            .error {{ color: #f44336; font-size: 60px; }}
+        </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="error">❌</div>
+                <h1>Verification Error</h1>
+                <p>Error: {str(e)}</p>
+                <p>Please try <code>/verify</code> again.</p>
+            </div>
+        </body>
+        </html>
+        """
 
 @app.route('/health')
 def health():
