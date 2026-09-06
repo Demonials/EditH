@@ -1,12 +1,18 @@
-FROM python:3.12-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install dependencies
-RUN pip install --no-cache-dir discord.py python-dotenv
+# Copy requirements first for better caching
+COPY requirements.txt .
 
-# Copy the bot
+# Install all dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the bot code
 COPY app.py .
+
+# Expose port
+EXPOSE 8080
 
 # Run the bot
 CMD ["python", "app.py"]
