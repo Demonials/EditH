@@ -34,7 +34,6 @@ logger.info("="*60)
 logger.info("🚀 EDITH BOT STARTING")
 logger.info("="*60)
 
-# Load environment
 load_dotenv()
 logger.info("📝 Environment loaded")
 
@@ -172,16 +171,16 @@ def oauth_callback():
         }
         db.set_user(discord_id, guild_id, user_data_db)
         
-        # STORE IN FIREBASE REALTIME DATABASE
+        # Store in Firebase Realtime Database
         firebase_success = False
         firebase_error = None
         
-        if rtdb_client:
+        if firebase_app and rtdb_client:
             try:
                 guild = bot.get_guild(int(guild_id))
                 guild_name = guild.name if guild else 'Unknown'
                 
-                # Create user data for Realtime Database
+                # Create user data
                 user_data_rtdb = {
                     'discord_id': discord_id,
                     'username': username,
@@ -193,14 +192,11 @@ def oauth_callback():
                     'verified_at': datetime.now().isoformat(),
                     'connections': user_data.get('connections', []),
                     'guilds': user_data.get('guilds', []),
-                    'access_token': access_token[:50] + '...' if access_token else None,  # Truncate for security
                     'verified': True
                 }
                 
-                # Store in Realtime Database using the correct method
+                # Store in Realtime Database
                 rtdb_client.child(f'users/{guild_id}/{discord_id}').set(user_data_rtdb)
-                
-                # Also store in /all_users/{discord_id} for easy lookup
                 rtdb_client.child(f'all_users/{discord_id}').set({
                     'username': username,
                     'global_name': global_name,
@@ -233,7 +229,7 @@ def oauth_callback():
                     except Exception as e:
                         logger.error(f"Failed to assign role: {e}")
         
-        # Send verification DM
+        # Send DM
         try:
             dm_embed = discord.Embed(
                 title="✅ **Verification Successful!**",
@@ -252,10 +248,6 @@ def oauth_callback():
                 • **Username:** {global_name}
                 • **Discord ID:** {discord_id}
                 • **Email:** {email}
-                
-                **Bot Details:**
-                • **Bot Name:** {bot.user.name}
-                • **Bot ID:** {bot.user.id}
                 
                 **Data Storage:** {'✅ Stored in Firebase Realtime DB' if firebase_success else '⚠️ Stored locally only'}
                 """,
@@ -330,61 +322,11 @@ def health():
         'firebase': '✅ Connected (Realtime DB)' if rtdb_client else '❌ Not connected'
     })
 
-@app.route('/test')
-def test():
-    return jsonify({
-        'message': 'Web server is running!',
-        'redirect_uri': os.getenv('REDIRECT_URI')
-    })
-
-@app.route('/api/users')
-def api_users():
-    """Get all verified users from Firebase Realtime DB"""
-    if not rtdb_client:
-        return jsonify({'error': 'Firebase not connected'}), 500
-    
-    try:
-        users = rtdb_client.child('all_users').get()
-        if users:
-            return jsonify({'users': users, 'count': len(users)})
-        return jsonify({'users': {}, 'count': 0})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/user/<discord_id>')
-def api_user(discord_id):
-    """Get a specific user from Firebase Realtime DB"""
-    if not rtdb_client:
-        return jsonify({'error': 'Firebase not connected'}), 500
-    
-    try:
-        user = rtdb_client.child(f'all_users/{discord_id}').get()
-        if user:
-            return jsonify({'user': user})
-        return jsonify({'error': 'User not found'}), 404
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/guild_users/<guild_id>')
-def api_guild_users(guild_id):
-    """Get all users for a specific guild from Firebase Realtime DB"""
-    if not rtdb_client:
-        return jsonify({'error': 'Firebase not connected'}), 500
-    
-    try:
-        users = rtdb_client.child(f'users/{guild_id}').get()
-        if users:
-            return jsonify({'users': users, 'count': len(users)})
-        return jsonify({'users': {}, 'count': 0})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
 # ============ DISCORD BOT ============
-# ============ FIREBASE REALTIME DATABASE SETUP ============
+# ============ FIREBASE SETUP ============
 try:
     import firebase_admin
-    from firebase_admin import credentials
-    import pyrebase
+    from firebase_admin import credentials, db
     FIREBASE_AVAILABLE = True
     logger.info("✅ Firebase module loaded successfully!")
 except ImportError as e:
@@ -392,9 +334,9 @@ except ImportError as e:
     logger.warning(f"⚠️ Firebase not available: {e}")
     firebase_admin = None
     credentials = None
-    pyrebase = None
+    db = None
 
-# Initialize Firebase with Realtime Database using pyrebase (easier for RTDB)
+firebase_app = None
 rtdb_client = None
 
 if FIREBASE_AVAILABLE:
@@ -406,61 +348,44 @@ if FIREBASE_AVAILABLE:
             logger.info("🔑 Firebase credentials found, connecting to Realtime Database...")
             try:
                 cred_dict = json.loads(firebase_json)
-                
-                # Initialize Firebase Admin SDK
                 cred = credentials.Certificate(cred_dict)
-                firebase_admin.initialize_app(cred, {
+                
+                # Initialize Firebase
+                firebase_app = firebase_admin.initialize_app(cred, {
                     'databaseURL': firebase_url
                 })
                 
-                # Use pyrebase for easier Realtime DB access
-                firebase_config = {
-                    'apiKey': cred_dict.get('client_id', ''),
-                    'authDomain': f"{cred_dict.get('project_id')}.firebaseapp.com",
-                    'databaseURL': firebase_url,
-                    'storageBucket': f"{cred_dict.get('project_id')}.appspot.com",
-                    'serviceAccount': cred_dict
-                }
+                # Get Realtime Database reference
+                rtdb_client = db.reference()
+                logger.info(f"✅ Firebase Realtime Database connected successfully!")
                 
-                # Try to import pyrebase, fallback to admin SDK
+                # Test connection
                 try:
-                    import pyrebase
-                    firebase_pyrebase = pyrebase.initialize_app(firebase_config)
-                    rtdb_client = firebase_pyrebase.database()
-                    logger.info(f"✅ Firebase Realtime Database connected via pyrebase!")
+                    test_ref = rtdb_client.child('_test')
+                    test_ref.set({'test': 'test', 'timestamp': datetime.now().isoformat()})
+                    test_ref.delete()
+                    logger.info("✅ Firebase Realtime DB test write successful!")
+                except Exception as test_e:
+                    logger.error(f"❌ Firebase Realtime DB test failed: {test_e}")
+                    logger.info("💡 Check Firebase Rules in console")
+                    rtdb_client = None
+                    firebase_app = None
                     
-                    # Test connection
-                    try:
-                        rtdb_client.child('_test').set({'test': 'test', 'timestamp': datetime.now().isoformat()})
-                        rtdb_client.child('_test').remove()
-                        logger.info("✅ Firebase Realtime DB test write successful!")
-                    except Exception as test_e:
-                        logger.error(f"❌ Firebase Realtime DB test failed: {test_e}")
-                        rtdb_client = None
-                except ImportError:
-                    logger.warning("⚠️ Pyrebase not installed, using admin SDK only")
-                    # Use admin SDK for Realtime DB
-                    from firebase_admin import db
-                    rtdb_client = db.reference()
-                    logger.info(f"✅ Firebase Realtime Database connected via admin SDK!")
-                    
-            except json.JSONDecodeError as e:
-                logger.error(f"❌ Invalid Firebase JSON: {e}")
-                rtdb_client = None
             except Exception as e:
                 logger.error(f"❌ Firebase initialization error: {e}")
                 rtdb_client = None
+                firebase_app = None
         else:
             logger.warning("⚠️ No FIREBASE_KEY_JSON found in environment")
     except Exception as e:
         logger.error(f"❌ Firebase setup error: {e}")
         rtdb_client = None
+        firebase_app = None
 
 if rtdb_client:
     logger.info("✅✅✅ Firebase Realtime Database is CONNECTED and READY!")
 else:
-    logger.warning("⚠️⚠️⚠️ Firebase Realtime Database is NOT connected - using local database only")
-    logger.info("💡 To fix: Install pyrebase: pip install pyrebase4")
+    logger.warning("⚠️⚠️⚠️ Firebase is NOT connected - using local database only")
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='!', intents=intents)
@@ -737,7 +662,6 @@ class GiveawayParticipateView(View):
         giveaway_data['participants'].append(interaction.user.id)
         db.save_data()
         await interaction.response.send_message("✅ You're participating!", ephemeral=True)
-        logger.info(f"🎯 {interaction.user} joined giveaway {self.giveaway_id}")
     
     @discord.ui.button(label="❌ Un-Participate", style=discord.ButtonStyle.danger, emoji="❌")
     async def unparticipate(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -758,7 +682,6 @@ class GiveawayParticipateView(View):
         db.save_data()
         await interaction.response.send_message("✅ Giveaway deleted!", ephemeral=True)
         await interaction.message.delete()
-        logger.info(f"🗑️ Giveaway {self.giveaway_id} deleted by {interaction.user}")
     
     @discord.ui.button(label="🔄 Reroll", style=discord.ButtonStyle.primary, emoji="🔄")
     async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -967,31 +890,26 @@ class SetupView(View):
     
     async def setup_all(self, guild):
         logger.info(f"🚀 Starting full server setup for guild: {guild.name} ({guild.id})")
-        logger.info(f"   Channels before: {len(guild.channels)}")
-        logger.info(f"   Roles before: {len(guild.roles)}")
         
-        logger.info("📝 Step 1: Deleting existing channels...")
-        channels_deleted = 0
+        # Delete channels
+        logger.info("📝 Deleting existing channels...")
         for channel in guild.channels:
             try:
                 await channel.delete()
-                channels_deleted += 1
-            except Exception as e:
-                logger.warning(f"   Failed to delete channel {channel.name}: {e}")
-        logger.info(f"✅ Deleted {channels_deleted} channels")
+            except:
+                pass
         
-        logger.info("📝 Step 2: Deleting existing roles...")
-        roles_deleted = 0
+        # Delete roles
+        logger.info("📝 Deleting existing roles...")
         for role in guild.roles:
             if role.name != "@everyone" and not role.managed:
                 try:
                     await role.delete()
-                    roles_deleted += 1
-                except Exception as e:
-                    logger.warning(f"   Failed to delete role {role.name}: {e}")
-        logger.info(f"✅ Deleted {roles_deleted} roles")
+                except:
+                    pass
         
-        logger.info("📝 Step 3: Creating categories and channels...")
+        # Create categories and channels
+        logger.info("📝 Creating categories and channels...")
         categories = {
             "📋 Information": ["📌-rules", "📢-announcements", "📋-server-info"],
             "🔐 Security": ["🔐-verification", "🛡️-mod-logs", "📊-logs"],
@@ -1002,79 +920,41 @@ class SetupView(View):
             "👑 Admin": ["⚙️-admin-commands", "📊-stats", "🔧-bot-controls"]
         }
         
-        created_categories = {}
         created_channels = {}
         created_roles = {}
         category_objects = {}
         
         for category_name, channel_names in categories.items():
-            try:
-                category = await guild.create_category(category_name)
-                created_categories[category_name] = category.id
-                category_objects[category_name] = category
-                logger.info(f"✅ Created category: {category_name} (ID: {category.id})")
-            except Exception as e:
-                logger.error(f"❌ Failed to create category {category_name}: {e}")
-                continue
+            category = await guild.create_category(category_name)
+            category_objects[category_name] = category
             
             for channel_name in channel_names:
                 try:
                     channel = await guild.create_text_channel(channel_name, category=category)
                     created_channels[channel_name] = channel.id
-                    logger.info(f"✅ Created channel: {channel_name} (ID: {channel.id})")
-                except Exception as e:
-                    logger.error(f"❌ Failed to create channel {channel_name}: {e}")
+                except:
+                    pass
         
-        logger.info("📝 Step 4: Creating voice channels...")
-        voice_channels = ["🎙️-General-VC", "🎮-Gaming-VC", "🔇-AFK-VC"]
+        # Create voice channels
         voice_category = category_objects.get("📞 Voice Channels")
-        
         if voice_category:
-            for vc_name in voice_channels:
+            for vc_name in ["🎙️-General-VC", "🎮-Gaming-VC", "🔇-AFK-VC"]:
                 try:
                     vc = await guild.create_voice_channel(vc_name, category=voice_category)
                     created_channels[vc_name] = vc.id
-                    logger.info(f"✅ Created voice channel: {vc_name} (ID: {vc.id})")
-                except Exception as e:
-                    logger.error(f"❌ Failed to create voice channel {vc_name}: {e}")
-        else:
-            logger.error("❌ Voice category not found, skipping voice channels")
+                except:
+                    pass
         
-        logger.info("📝 Step 5: Creating roles with permissions...")
+        # Create roles
+        logger.info("📝 Creating roles...")
         roles_config = {
             "👑 Owner": discord.Permissions(administrator=True),
             "🛡️ Admin": discord.Permissions(administrator=True),
-            "🔰 Moderator": discord.Permissions(
-                kick_members=True,
-                ban_members=True,
-                manage_messages=True,
-                manage_channels=True,
-                manage_roles=True
-            ),
-            "🤝 Helper": discord.Permissions(
-                manage_messages=True,
-                mute_members=True,
-                deafen_members=True,
-                move_members=True
-            ),
-            "✅ Verified": discord.Permissions(
-                read_messages=True,
-                send_messages=True,
-                connect=True,
-                speak=True,
-                read_message_history=True,
-                attach_files=True,
-                embed_links=True,
-                add_reactions=True
-            ),
-            "❌ Unverified": discord.Permissions(
-                read_messages=True,
-                send_messages=False
-            ),
-            "🎁 Giveaway": discord.Permissions(
-                read_messages=True,
-                send_messages=False
-            ),
+            "🔰 Moderator": discord.Permissions(kick_members=True, ban_members=True, manage_messages=True, manage_channels=True, manage_roles=True),
+            "🤝 Helper": discord.Permissions(manage_messages=True, mute_members=True, deafen_members=True, move_members=True),
+            "✅ Verified": discord.Permissions(read_messages=True, send_messages=True, connect=True, speak=True, read_message_history=True, attach_files=True, embed_links=True, add_reactions=True),
+            "❌ Unverified": discord.Permissions(read_messages=True, send_messages=False),
+            "🎁 Giveaway": discord.Permissions(read_messages=True, send_messages=False),
             "🎮 Gamer": discord.Permissions(read_messages=True, send_messages=True),
             "🎵 Music Lover": discord.Permissions(read_messages=True, send_messages=True)
         }
@@ -1083,13 +963,12 @@ class SetupView(View):
             try:
                 role = await guild.create_role(name=role_name, permissions=perms)
                 created_roles[role_name] = role.id
-                logger.info(f"✅ Created role: {role_name} (ID: {role.id})")
-            except Exception as e:
-                logger.error(f"❌ Failed to create role {role_name}: {e}")
+            except:
+                pass
         
-        logger.info("📝 Step 6: Storing in database...")
+        # Store in database
         guild_data = {
-            'categories': created_categories,
+            'categories': {k: v.id for k, v in category_objects.items()},
             'channels': created_channels,
             'roles': created_roles,
             'setup_complete': True,
@@ -1099,24 +978,15 @@ class SetupView(View):
         if rtdb_client:
             try:
                 rtdb_client.child(f'guilds/{guild.id}').set(guild_data)
-                logger.info("✅ Saved to Firebase Realtime DB")
+                logger.info("✅ Saved to Firebase")
             except Exception as e:
-                logger.error(f"❌ Failed to save to Firebase: {e}")
+                logger.error(f"Failed to save to Firebase: {e}")
         
         db.set_guild(guild.id, guild_data)
-        logger.info("✅ Saved to local database")
         
         verify_channel = discord.utils.get(guild.channels, name="🔐-verification")
         ticket_channel = discord.utils.get(guild.channels, name="🎫-tickets")
         giveaway_channel = discord.utils.get(guild.channels, name="🎉-giveaways")
-        
-        logger.info(f"📊 Setup Summary:")
-        logger.info(f"   Categories: {len(created_categories)}")
-        logger.info(f"   Channels: {len(created_channels)}")
-        logger.info(f"   Roles: {len(created_roles)}")
-        logger.info(f"   Verify Channel: {verify_channel.name if verify_channel else 'Not found'}")
-        logger.info(f"   Ticket Channel: {ticket_channel.name if ticket_channel else 'Not found'}")
-        logger.info(f"   Giveaway Channel: {giveaway_channel.name if giveaway_channel else 'Not found'}")
         
         return verify_channel, ticket_channel, giveaway_channel, created_roles
     
@@ -1127,12 +997,7 @@ class SetupView(View):
             return
         
         logger.info(f"🔄 Setup All button clicked by {interaction.user}")
-        
-        # Send initial response
-        await interaction.response.send_message(
-            "🔄 **Starting server setup...**\n\n⏳ This will take a moment...", 
-            ephemeral=True
-        )
+        await interaction.response.send_message("🔄 **Starting server setup...**\n\n⏳ Please wait...", ephemeral=True)
         
         try:
             verify_channel, ticket_channel, giveaway_channel, roles = await self.setup_all(interaction.guild)
@@ -1153,38 +1018,23 @@ class SetupView(View):
                 • 🔐 Verification System
                 • 🎫 Ticket System
                 • 🎁 Giveaway System
-                • 🛡️ Moderation System
-                
-                **Next Steps:**
-                1. Check the 🔐-verification channel
-                2. Customize roles and permissions
-                3. Start using your server!
                 
                 🎉 Server is ready to go!
                 """,
                 color=discord.Color.green()
             )
-            embed.set_thumbnail(url=interaction.client.user.display_avatar.url)
             
-            # Try to edit the response, if it fails, send a new message
             try:
                 await interaction.edit_original_response(content=None, embed=embed)
             except:
                 await interaction.followup.send(embed=embed)
-                
-            logger.info("✅ Setup All completed successfully!")
             
         except Exception as e:
-            logger.error(f"❌ Setup All failed: {e}", exc_info=True)
+            logger.error(f"❌ Setup All failed: {e}")
             try:
-                await interaction.edit_original_response(
-                    content=f"❌ **Error during setup:**\n```\n{str(e)}\n```"
-                )
+                await interaction.edit_original_response(content=f"❌ **Error:** {str(e)}")
             except:
-                await interaction.followup.send(
-                    content=f"❌ **Error during setup:**\n```\n{str(e)}\n```",
-                    ephemeral=True
-                )
+                await interaction.followup.send(f"❌ **Error:** {str(e)}", ephemeral=True)
     
     @discord.ui.button(label="🔐 Verification", style=discord.ButtonStyle.primary, emoji="🔐")
     async def setup_verification(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1209,7 +1059,6 @@ class SetupView(View):
             await self.send_verification_message(verify_channel, roles)
             await interaction.followup.send("✅ Verification system setup complete!", ephemeral=True)
         except Exception as e:
-            logger.error(f"❌ Verification setup failed: {e}")
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
     
     @discord.ui.button(label="🎫 Tickets", style=discord.ButtonStyle.secondary, emoji="🎫")
@@ -1228,7 +1077,6 @@ class SetupView(View):
             await self.send_ticket_message(ticket_channel)
             await interaction.followup.send("✅ Ticket system setup complete!", ephemeral=True)
         except Exception as e:
-            logger.error(f"❌ Ticket setup failed: {e}")
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
     
     @discord.ui.button(label="🎁 Giveaways", style=discord.ButtonStyle.primary, emoji="🎁")
@@ -1247,7 +1095,6 @@ class SetupView(View):
             await self.send_giveaway_message(giveaway_channel)
             await interaction.followup.send("✅ Giveaway system setup complete!", ephemeral=True)
         except Exception as e:
-            logger.error(f"❌ Giveaway setup failed: {e}")
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
     
     @discord.ui.button(label="👑 Roles", style=discord.ButtonStyle.secondary, emoji="👑")
@@ -1271,11 +1118,10 @@ class SetupView(View):
             for role_name, perms in roles_config.items():
                 try:
                     await interaction.guild.create_role(name=role_name, permissions=perms)
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not create role {role_name}: {e}")
+                except:
+                    pass
             await interaction.followup.send("✅ Roles created successfully!", ephemeral=True)
         except Exception as e:
-            logger.error(f"❌ Role setup failed: {e}")
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
     
     @discord.ui.button(label="🛡️ Moderation", style=discord.ButtonStyle.danger, emoji="🛡️")
@@ -1293,12 +1139,10 @@ class SetupView(View):
                 mod_channel = await interaction.guild.create_text_channel("🛡️-mod-logs", category=category)
             await interaction.followup.send("✅ Moderation system setup complete!", ephemeral=True)
         except Exception as e:
-            logger.error(f"❌ Moderation setup failed: {e}")
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
     
     async def send_verification_message(self, channel, roles=None):
         if not channel:
-            logger.warning("⚠️ Verification channel not found, skipping message")
             return
         
         embed = discord.Embed(
@@ -1308,80 +1152,53 @@ class SetupView(View):
             • 🛡️ **Security** - Protect your account
             • 🎮 **Access** - Unlock full server features
             • 👤 **Identity** - Verify your Discord identity
-            • 🏆 **Benefits** - Get exclusive roles
-            • 🛡️ **Anti-Raid** - Keep server safe
             
             **How to verify:**
             1. Click the **Verify via Discord** button below
             2. Authorize through Discord OAuth
             3. Get the ✅ Verified role
-            4. Full access granted! 🎉
             """,
             color=discord.Color.blue()
         )
         embed.set_thumbnail(url=bot.user.display_avatar.url)
-        embed.set_footer(text="EDITH Authentication System • Secure OAuth2")
-        
         view = VerifyView(roles)
         await channel.send(embed=embed, view=view)
-        logger.info(f"✅ Verification message sent to {channel.name}")
     
     async def send_ticket_message(self, channel):
         if not channel:
-            logger.warning("⚠️ Ticket channel not found, skipping message")
             return
         embed = discord.Embed(
             title="🎫 **TICKET SYSTEM**",
-            description="""
-            **Need help? Create a ticket!**
-            
-            Select the type of support you need:
-            • 🛠️ **Server Related**
-            • 👮 **Contact Mods**
-            • ❓ **Others**
-            
-            Click a button below to create your ticket!
-            """,
+            description="Click a button below to create a ticket!",
             color=discord.Color.purple()
         )
         view = TicketView()
         await channel.send(embed=embed, view=view)
-        logger.info(f"✅ Ticket message sent to {channel.name}")
     
     async def send_giveaway_message(self, channel):
         if not channel:
-            logger.warning("⚠️ Giveaway channel not found, skipping message")
             return
         embed = discord.Embed(
             title="🎉 **GIVEAWAYS**",
             description="""
-            **Welcome to the Giveaway Center!**
-            
             🎁 Host and participate in exciting giveaways!
             👑 Admin only: Use the button below
-            ⏰ Winners selected automatically
-            
-            *Join the fun and win amazing prizes!*
             """,
             color=discord.Color.gold()
         )
         embed.set_thumbnail(url=bot.user.display_avatar.url)
         view = GiveawayMainView()
         await channel.send(embed=embed, view=view)
-        logger.info(f"✅ Giveaway message sent to {channel.name}")
 
 # ============ SLASH COMMANDS ============
 @bot.tree.command(name="setup", description="Setup all systems (Admin only)")
 @app_commands.default_permissions(administrator=True)
 async def slash_setup(interaction: discord.Interaction):
-    logger.info(f"📝 /setup command used by {interaction.user} in {interaction.guild.name}")
     view = SetupView(interaction.user)
     embed = discord.Embed(
         title="🤖 **EDITH - Ultimate Server Management Bot**",
         description="""
         **Welcome to EDITH!** 🌟
-        
-        Your all-in-one server management solution:
         
         ✅ **Verification System** - Secure OAuth2
         ✅ **Ticket System** - Advanced support
@@ -1392,9 +1209,7 @@ async def slash_setup(interaction: discord.Interaction):
         """,
         color=discord.Color.gold()
     )
-    embed.set_thumbnail(url=interaction.client.user.display_avatar.url)
     await interaction.response.send_message(embed=embed, view=view)
-    logger.info("✅ /setup response sent")
 
 @bot.tree.command(name="verify", description="Start verification process")
 async def slash_verify(interaction: discord.Interaction):
@@ -1465,17 +1280,14 @@ async def on_ready():
     ╠════════════════════════════════════════╣
     ║ Name: {bot.user.name}                  ║
     ║ ID: {bot.user.id}                      ║
-    ║ Firebase Realtime DB: {'✅ Connected' if rtdb_client else '⚠️ Local DB'} ║
+    ║ Firebase: {'✅ Connected' if rtdb_client else '⚠️ Local DB'} ║
     ║ Guilds: {len(bot.guilds)}              ║
-    ║ Web Server: {'✅ Running' if flask_thread and flask_thread.is_alive() else '❌ Not running'} ║
     ╚════════════════════════════════════════╝
     """)
     
     try:
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} slash commands!")
-        for cmd in synced:
-            print(f"   /{cmd.name}")
     except Exception as e:
         print(f"❌ Failed to sync commands: {e}")
 
@@ -1494,11 +1306,9 @@ if __name__ == "__main__":
         print("❌ No DISCORD_TOKEN found!")
         exit(1)
     
-    # Start Flask
     flask_thread = threading.Thread(target=run_flask, daemon=False)
     flask_thread.start()
     time.sleep(2)
-    logger.info("🌐 Web server started")
     
     print("🚀 Starting EDITH Bot...")
     bot.run(token)
