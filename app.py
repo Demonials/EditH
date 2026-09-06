@@ -129,19 +129,6 @@ def oauth_callback():
             logger.info(f"   Session found locally: {session is not None}")
         
         if not session:
-            # Try to get from database
-            if db_firebase:
-                try:
-                    doc_ref = db_firebase.collection('oauth_states').document(state)
-                    doc = doc_ref.get()
-                    if doc.exists:
-                        session = doc.to_dict()
-                        doc_ref.delete()
-                        logger.info("   Session found in Firebase")
-                except Exception as e:
-                    logger.error(f"   Failed to get session from Firebase: {e}")
-        
-        if not session:
             return """
             <!DOCTYPE html>
             <html>
@@ -398,8 +385,10 @@ if FIREBASE_AVAILABLE:
             logger.info("✅ Firebase connected successfully!")
         else:
             logger.warning("⚠️ No Firebase credentials found in environment")
+            logger.info("💡 To fix: Add FIREBASE_KEY_JSON to Railway environment variables")
     except Exception as e:
         logger.error(f"❌ Firebase connection error: {e}")
+        logger.info("💡 Make sure FIREBASE_KEY_JSON is set correctly in Railway environment variables")
         db_firebase = None
 
 # Initialize bot with slash commands
@@ -920,14 +909,14 @@ class SetupView(View):
         self.author = author
         logger.info(f"🛠️ SetupView created by {author} ({author.id})")
     
-    async def setup_all(self, guild, interaction):
+    async def setup_all(self, guild):
         """Complete server setup with progress updates"""
         
         logger.info(f"🚀 Starting full server setup for guild: {guild.name} ({guild.id})")
         logger.info(f"   Channels before: {len(guild.channels)}")
         logger.info(f"   Roles before: {len(guild.roles)}")
         
-        # Step 1: Delete existing channels (don't use edit_original_response during deletion)
+        # Step 1: Delete existing channels
         logger.info("📝 Step 1: Deleting existing channels...")
         
         channels_deleted = 0
@@ -970,11 +959,7 @@ class SetupView(View):
         created_roles = {}
         category_objects = {}
         
-        total_categories = len(categories)
-        category_count = 0
-        
         for category_name, channel_names in categories.items():
-            category_count += 1
             try:
                 category = await guild.create_category(category_name)
                 created_categories[category_name] = category.id
@@ -1111,10 +1096,10 @@ class SetupView(View):
         
         try:
             verify_channel, ticket_channel, giveaway_channel, roles = await self.setup_all(
-                interaction.guild, interaction
+                interaction.guild
             )
             
-            # Send messages (don't edit original response, send new messages)
+            # Send messages
             await self.send_verification_message(verify_channel, roles)
             await self.send_ticket_message(ticket_channel)
             await self.send_giveaway_message(giveaway_channel)
@@ -1144,7 +1129,6 @@ class SetupView(View):
             )
             embed.set_thumbnail(url=interaction.client.user.display_avatar.url)
             
-            # Edit the original response with success
             await interaction.edit_original_response(content=None, embed=embed)
             logger.info("✅ Setup All completed successfully!")
             
@@ -1344,7 +1328,7 @@ class SetupView(View):
         await channel.send(embed=embed, view=view)
         logger.info(f"✅ Giveaway message sent to {channel.name}")
 
-# ============ VERIFICATION VIEW WITH OAUTH - FIXED FOR NEW TAB ============
+# ============ VERIFICATION VIEW WITH OAUTH - FIXED ============
 class VerifyView(View):
     def __init__(self, roles=None):
         super().__init__(timeout=None)
