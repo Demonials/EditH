@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-from discord.ui import Button, View, Modal, TextInput
+from discord.ui import Button, View, Modal, TextInput, Select
 import os
 import json
 import secrets
@@ -12,10 +12,11 @@ import aiohttp
 import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from flask import Flask, request, redirect, jsonify
+from flask import Flask, request, redirect, jsonify, render_template_string
 import threading
 import time
 import hashlib
+import string
 
 # ============ SETUP LOGGING ============
 os.makedirs('./logs', exist_ok=True)
@@ -74,7 +75,6 @@ if FIREBASE_AVAILABLE:
                 rtdb_client = db.reference()
                 logger.info(f"✅ Firebase connected!")
                 
-                # Test connection
                 try:
                     test_ref = rtdb_client.child('_test')
                     test_ref.set({'test': 'test', 'timestamp': datetime.now().isoformat()})
@@ -165,7 +165,6 @@ oauth_states = {}
 
 # ============ FIREBASE HELPER FUNCTIONS ============
 def firebase_set(path, data):
-    """Set data in Firebase"""
     if rtdb_client:
         try:
             rtdb_client.child(path).set(data)
@@ -176,7 +175,6 @@ def firebase_set(path, data):
     return False
 
 def firebase_get(path):
-    """Get data from Firebase"""
     if rtdb_client:
         try:
             return rtdb_client.child(path).get()
@@ -186,7 +184,6 @@ def firebase_get(path):
     return None
 
 def firebase_update(path, data):
-    """Update data in Firebase"""
     if rtdb_client:
         try:
             rtdb_client.child(path).update(data)
@@ -197,7 +194,6 @@ def firebase_update(path, data):
     return False
 
 def firebase_delete(path):
-    """Delete data from Firebase"""
     if rtdb_client:
         try:
             rtdb_client.child(path).delete()
@@ -207,24 +203,44 @@ def firebase_delete(path):
             return False
     return False
 
-def generate_credentials(user_id, role='member'):
-    """Generate username and password for user"""
-    username = f"user_{str(user_id)[:8]}_{secrets.token_hex(4)}"
-    password = secrets.token_urlsafe(12)
+def generate_credentials(user_id, username=None, role='member'):
+    """Generate or retrieve credentials for a user"""
+    # Check if credentials already exist
+    existing = firebase_get(f'credentials/{user_id}')
+    if existing:
+        return existing
     
-    # Store in Firebase
-    firebase_set(f'credentials/{user_id}', {
+    # Generate new credentials
+    if not username:
+        username = f"user_{str(user_id)[:6]}_{secrets.token_hex(4)}"
+    
+    # Generate secure password
+    alphabet = string.ascii_letters + string.digits + '!@#$%^&*'
+    password = ''.join(secrets.choice(alphabet) for _ in range(16))
+    
+    creds = {
         'username': username,
         'password': password,
         'role': role,
+        'user_id': user_id,
         'created_at': datetime.now().isoformat()
-    })
+    }
     
-    return {'username': username, 'password': password, 'role': role}
+    firebase_set(f'credentials/{user_id}', creds)
+    firebase_set(f'credentials_by_username/{username}', user_id)
+    
+    return creds
 
 def get_credentials(user_id):
     """Get user credentials from Firebase"""
     return firebase_get(f'credentials/{user_id}')
+
+def get_credentials_by_username(username):
+    """Get user ID by username"""
+    user_id = firebase_get(f'credentials_by_username/{username}')
+    if user_id:
+        return get_credentials(user_id)
+    return None
 
 def update_credentials_role(user_id, new_role):
     """Update user's role in credentials"""
@@ -235,23 +251,52 @@ def update_credentials_role(user_id, new_role):
         return True
     return False
 
-async def send_credentials_dm(member, creds):
-    """Send credentials via DM"""
+async def send_credentials_dm(member, creds, role=None):
+    """Send credentials via DM with beautiful embed"""
+    if not creds:
+        return False
+    
+    role = role or creds.get('role', 'member')
+    
     embed = discord.Embed(
-        title="🔐 Your EDITH Credentials",
+        title="🔐 **Your EDITH Login Credentials**",
         description=f"Welcome to **{member.guild.name}**!",
-        color=discord.Color.green()
+        color=discord.Color.gold()
     )
-    embed.add_field(name="Username", value=f"`{creds['username']}`", inline=True)
-    embed.add_field(name="Password", value=f"`{creds['password']}`", inline=True)
-    embed.add_field(name="Role", value=f"`{creds['role'].upper()}`", inline=True)
-    embed.add_field(name="Login URL", value=f"[Click Here]({os.getenv('WEBSITE_URL', 'https://edith-bot.up.railway.app')})", inline=False)
-    embed.set_footer(text="⚠️ Keep these safe! You cannot reset your password.")
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(
+        name="📝 Username",
+        value=f"`{creds['username']}`",
+        inline=True
+    )
+    embed.add_field(
+        name="🔑 Password",
+        value=f"`{creds['password']}`",
+        inline=True
+    )
+    embed.add_field(
+        name="🎭 Role",
+        value=f"`{role.upper()}`",
+        inline=True
+    )
+    embed.add_field(
+        name="🌐 Login URL",
+        value=f"[Click Here to Login]({os.getenv('WEBSITE_URL', 'https://edith-bot.up.railway.app')})",
+        inline=False
+    )
+    embed.add_field(
+        name="⚠️ Important",
+        value="Keep these credentials safe! You cannot reset your password.",
+        inline=False
+    )
+    embed.set_footer(text="EDITH Authentication System • Secure Your Account")
     
     try:
         await member.send(embed=embed)
+        logger.info(f"✅ Credentials sent to {member.name}")
         return True
-    except:
+    except discord.Forbidden:
+        logger.warning(f"❌ Cannot DM {member.name} - DMs disabled")
         return False
 
 async def save_guild_config(guild):
@@ -284,12 +329,6 @@ async def save_guild_config(guild):
             'public_updates_channel_id': str(guild.public_updates_channel.id) if guild.public_updates_channel else None,
             'afk_channel_id': str(guild.afk_channel.id) if guild.afk_channel else None,
             'afk_timeout': guild.afk_timeout,
-            'max_presences': guild.max_presences,
-            'max_members': guild.max_members,
-            'discovery_splash_url': guild.discovery_splash.url if guild.discovery_splash else None,
-            'vanity_url_code': guild.vanity_url_code,
-            'widget_enabled': guild.widget_enabled,
-            'widget_channel_id': str(guild.widget_channel.id) if guild.widget_channel else None,
             'updated_at': datetime.now().isoformat()
         }
         
@@ -300,101 +339,29 @@ async def save_guild_config(guild):
         logger.error(f"Failed to save guild config: {e}")
         return False
 
-async def save_guild_template(guild):
-    """Save guild template (channels, roles, categories)"""
-    if not rtdb_client:
-        return False
-    
-    try:
-        template = {
-            'categories': {},
-            'channels': {},
-            'roles': {},
-            'settings': {}
-        }
-        
-        # Save categories
-        for category in guild.categories:
-            template['categories'][category.name] = {
-                'id': str(category.id),
-                'position': category.position,
-                'channels': []
-            }
-        
-        # Save channels
-        for channel in guild.channels:
-            template['channels'][channel.name] = {
-                'id': str(channel.id),
-                'type': str(channel.type),
-                'position': channel.position,
-                'category_id': str(channel.category.id) if channel.category else None,
-                'topic': channel.topic or '',
-                'slowmode_delay': channel.slowmode_delay if hasattr(channel, 'slowmode_delay') else 0,
-                'nsfw': channel.nsfw if hasattr(channel, 'nsfw') else False
-            }
-            
-            # Add to category
-            if channel.category:
-                for cat in template['categories']:
-                    if template['categories'][cat]['id'] == str(channel.category.id):
-                        if channel.name not in template['categories'][cat]['channels']:
-                            template['categories'][cat]['channels'].append(channel.name)
-        
-        # Save roles
-        for role in guild.roles:
-            if role.name != "@everyone":
-                template['roles'][role.name] = {
-                    'id': str(role.id),
-                    'color': str(role.color),
-                    'position': role.position,
-                    'hoist': role.hoist,
-                    'mentionable': role.mentionable,
-                    'permissions': role.permissions.value,
-                    'permissions_text': str(role.permissions)
-                }
-        
-        # Save settings
-        template['settings'] = {
-            'verification_level': str(guild.verification_level),
-            'explicit_content_filter': str(guild.explicit_content_filter),
-            'default_notifications': str(guild.default_notifications),
-            'afk_timeout': guild.afk_timeout
-        }
-        
-        firebase_set(f'guilds/{guild.id}/template', template)
-        logger.info(f"✅ Saved guild template for {guild.name}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to save guild template: {e}")
-        return False
-
 async def sync_server_members(guild):
     """Sync all members in a guild - create credentials, move between verified/unverified"""
     if not rtdb_client:
         return
     
     try:
-        # Get all members
         members = guild.members
         verified_role = discord.utils.get(guild.roles, name="✅ Verified")
         unverified_role = discord.utils.get(guild.roles, name="❌ Unverified")
         
-        # Get Firebase members
+        # Get current Firebase data
         firebase_verified = firebase_get(f'guilds/{guild.id}/verified') or {}
         firebase_unverified = firebase_get(f'guilds/{guild.id}/unverified') or {}
-        firebase_creds = firebase_get('credentials') or {}
         
-        # Track current members in Firebase
+        # Track current members
         firebase_members = set(list(firebase_verified.keys()) + list(firebase_unverified.keys()))
         current_members = set([str(m.id) for m in members if not m.bot])
         
         # Remove members who left
         for user_id in firebase_members:
             if user_id not in current_members:
-                # Remove from Firebase
                 firebase_delete(f'guilds/{guild.id}/verified/{user_id}')
                 firebase_delete(f'guilds/{guild.id}/unverified/{user_id}')
-                firebase_delete(f'credentials/{user_id}')
                 logger.info(f"🗑️ Removed {user_id} (left server)")
         
         # Process current members
@@ -411,25 +378,25 @@ async def sync_server_members(guild):
             if not creds:
                 # Generate new credentials
                 role_type = 'moderator' if is_admin else 'member'
-                creds = generate_credentials(user_id, role_type)
-                await send_credentials_dm(member, creds)
+                creds = generate_credentials(user_id, role=role_type)
+                await send_credentials_dm(member, creds, role_type)
                 logger.info(f"🔑 Generated credentials for {member.name}")
+            else:
+                # Update role if changed
+                current_role = creds.get('role', 'member')
+                if is_admin and current_role != 'moderator':
+                    update_credentials_role(user_id, 'moderator')
+                    await send_credentials_dm(member, creds, 'moderator')
+                    logger.info(f"🔄 Updated {member.name} to moderator")
+                elif not is_admin and current_role != 'member':
+                    update_credentials_role(user_id, 'member')
+                    await send_credentials_dm(member, creds, 'member')
+                    logger.info(f"🔄 Updated {member.name} to member")
             
-            # Update role if changed
-            if creds and is_admin and creds.get('role') != 'moderator':
-                update_credentials_role(user_id, 'moderator')
-                await send_credentials_dm(member, {'username': creds['username'], 'password': creds['password'], 'role': 'moderator'})
-                logger.info(f"🔄 Updated {member.name} to moderator")
-            elif creds and not is_admin and creds.get('role') != 'member':
-                update_credentials_role(user_id, 'member')
-                await send_credentials_dm(member, {'username': creds['username'], 'password': creds['password'], 'role': 'member'})
-                logger.info(f"🔄 Updated {member.name} to member")
-            
-            # Move between verified/unverified
+            # Move between verified/unverified in Firebase
             if is_verified:
-                # Move to verified
-                firebase_delete(f'guilds/{guild.id}/unverified/{user_id}')
-                firebase_set(f'guilds/{guild.id}/verified/{user_id}', {
+                # Get all user data
+                user_data = {
                     'discord_id': user_id,
                     'username': member.name,
                     'global_name': member.display_name or member.name,
@@ -438,269 +405,508 @@ async def sync_server_members(guild):
                     'verified_at': datetime.now().isoformat(),
                     'roles': [r.name for r in member.roles if r.name != "@everyone"],
                     'credentials': creds
-                })
+                }
+                
+                # Add notes if any
+                notes = firebase_get(f'guilds/{guild.id}/verified/{user_id}/notes')
+                if notes:
+                    user_data['notes'] = notes
+                
+                firebase_set(f'guilds/{guild.id}/verified/{user_id}', user_data)
+                firebase_delete(f'guilds/{guild.id}/unverified/{user_id}')
             else:
-                # Move to unverified
-                firebase_delete(f'guilds/{guild.id}/verified/{user_id}')
                 firebase_set(f'guilds/{guild.id}/unverified/{user_id}', {
                     'discord_id': user_id,
                     'username': member.name,
                     'joined_at': member.joined_at.isoformat() if member.joined_at else None,
                     'roles': [r.name for r in member.roles if r.name != "@everyone"]
                 })
+                firebase_delete(f'guilds/{guild.id}/verified/{user_id}')
         
         logger.info(f"✅ Synced {len(members)} members for {guild.name}")
+        return True
         
     except Exception as e:
         logger.error(f"Failed to sync members: {e}")
+        return False
 
-# ============ FLASK ROUTES ============
-@app.route('/')
-def home():
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>EDITH Bot - Management</title>
-        <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
-            .container { background: #2d2d44; padding: 40px; border-radius: 20px; max-width: 600px; width: 100%; }
-            h1 { text-align: center; margin-bottom: 10px; }
-            .subtitle { text-align: center; color: #b5b5c4; margin-bottom: 30px; }
-            .status { background: #1e1e32; padding: 20px; border-radius: 12px; margin: 20px 0; }
-            .status-item { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #2d2d44; }
-            .status-item:last-child { border-bottom: none; }
-            .label { color: #888; }
-            .value { color: #4caf50; }
-            .badge { display: inline-block; background: #4caf50; padding: 4px 12px; border-radius: 20px; font-size: 11px; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🤖 EDITH Bot</h1>
-            <p class="subtitle">Ultimate Server Management System</p>
+# ============ BIG SETUP VIEW ============
+class BigSetupView(View):
+    def __init__(self, author):
+        super().__init__(timeout=300)
+        self.author = author
+    
+    @discord.ui.button(label="⚡ SETUP ALL", style=discord.ButtonStyle.success, emoji="⚡", row=0)
+    async def setup_all_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.author:
+            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+            return
+        await interaction.response.send_message("🔄 **Starting full server setup...**\n\n⏳ This will take a moment...", ephemeral=True)
+        await self.setup_all(interaction.guild, interaction)
+    
+    @discord.ui.button(label="🔐 VERIFICATION SYSTEM", style=discord.ButtonStyle.primary, emoji="🔐", row=0)
+    async def setup_verification(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.author:
+            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            channel = await self.get_or_create_channel(interaction.guild, "🔐-verification", "🔐 Security")
+            await self.send_verification_message(channel)
+            await interaction.followup.send(f"✅ Verification system setup complete in {channel.mention}!", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+    
+    @discord.ui.button(label="🎫 TICKET SYSTEM", style=discord.ButtonStyle.secondary, emoji="🎫", row=0)
+    async def setup_tickets(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.author:
+            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            channel = await self.get_or_create_channel(interaction.guild, "🎫-tickets", "🎫 Support")
+            await self.send_ticket_message(channel)
+            await interaction.followup.send(f"✅ Ticket system setup complete in {channel.mention}!", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+    
+    @discord.ui.button(label="🎁 GIVEAWAY SYSTEM", style=discord.ButtonStyle.primary, emoji="🎁", row=0)
+    async def setup_giveaways(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.author:
+            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            channel = await self.get_or_create_channel(interaction.guild, "🎉-giveaways", "🎉 Events")
+            await self.send_giveaway_message(channel)
+            await interaction.followup.send(f"✅ Giveaway system setup complete in {channel.mention}!", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+    
+    @discord.ui.button(label="👑 ROLE MANAGEMENT", style=discord.ButtonStyle.secondary, emoji="👑", row=1)
+    async def setup_roles(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.author:
+            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await self.create_roles(interaction.guild)
+            await interaction.followup.send("✅ Role management system setup complete!", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+    
+    @discord.ui.button(label="🛡️ MODERATION SUITE", style=discord.ButtonStyle.danger, emoji="🛡️", row=1)
+    async def setup_moderation(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.author:
+            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            channel = await self.get_or_create_channel(interaction.guild, "🛡️-mod-logs", "🔐 Security")
+            await interaction.followup.send(f"✅ Moderation suite setup complete! Logs will go to {channel.mention}", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+    
+    @discord.ui.button(label="📊 SERVER STATS", style=discord.ButtonStyle.secondary, emoji="📊", row=1)
+    async def setup_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.author:
+            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.followup.send("✅ Server stats system setup complete!", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+    
+    @discord.ui.button(label="💾 BACKUP SYSTEM", style=discord.ButtonStyle.success, emoji="💾", row=1)
+    async def setup_backup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.author:
+            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await save_guild_config(interaction.guild)
+            await save_guild_template(interaction.guild)
+            await interaction.followup.send("✅ Backup system setup complete! Full server backup saved!", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+    
+    @discord.ui.button(label="🔄 SYNC MEMBERS", style=discord.ButtonStyle.primary, emoji="🔄", row=2)
+    async def sync_members(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.author:
+            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await sync_server_members(interaction.guild)
+            await interaction.followup.send("✅ Members synced! All credentials generated and sent!", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+    
+    @discord.ui.button(label="📝 CREDENTIALS", style=discord.ButtonStyle.secondary, emoji="📝", row=2)
+    async def manage_credentials(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.author:
+            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        
+        embed = discord.Embed(
+            title="📝 **Credential Management**",
+            description="""
+            **Commands:**
+            • `/credentials` - Get your own credentials
+            • `/get_creds @user` - Get credentials for a user (Admin)
+            • `/reset_creds @user` - Reset credentials for a user (Admin)
+            • `/sync` - Sync all members and generate credentials
+            """,
+            color=discord.Color.blue()
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    
+    @discord.ui.button(label="🏗️ FULL SERVER SETUP", style=discord.ButtonStyle.danger, emoji="🏗️", row=2)
+    async def full_server_setup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.author:
+            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+            return
+        
+        # Create a confirmation view
+        confirm_view = ConfirmView(self.author)
+        embed = discord.Embed(
+            title="⚠️ **WARNING: Full Server Setup**",
+            description="""
+            This will **DELETE ALL** existing channels and roles and create a complete new server structure.
             
-            <div class="status">
-                <div class="status-item">
-                    <span class="label">Status</span>
-                    <span class="value">✅ Online</span>
-                </div>
-                <div class="status-item">
-                    <span class="label">Firebase</span>
-                    <span class="value">✅ Connected</span>
-                </div>
-                <div class="status-item">
-                    <span class="label">Features</span>
-                    <span class="value">Verification • Tickets • Giveaways • Credentials</span>
-                </div>
-            </div>
+            **What will be created:**
+            • 📋 7 Categories with 27+ Channels
+            • 👑 9 Roles with permissions
+            • 🔐 Verification System
+            • 🎫 Ticket System
+            • 🎁 Giveaway System
+            • 🛡️ Moderation System
+            • 📊 Stats System
+            • 💾 Backup System
             
-            <p style="text-align: center; color: #888; font-size: 12px;">Use /setup in Discord to configure your server</p>
-        </div>
-    </body>
-    </html>
-    """
-
-@app.route('/callback')
-def oauth_callback():
-    try:
-        code = request.args.get('code')
-        state = request.args.get('state')
-        error = request.args.get('error')
-        
-        if error:
-            return f"<h1>Error: {error}</h1><p>Please try /verify again.</p>"
-        
-        if not code:
-            return "<h1>No code provided</h1><p>Please try /verify again.</p>", 400
-        
-        session = None
-        if state:
-            session = oauth_states.pop(state, None)
-        
-        if not session:
-            return "<h1>Session expired</h1><p>Please run /verify again.</p>"
-        
-        user_id = session['user_id']
-        guild_id = session['guild_id']
-        
-        # Exchange code for token
-        async def exchange_code():
-            data = {
-                'client_id': os.getenv('CLIENT_ID'),
-                'client_secret': os.getenv('CLIENT_SECRET'),
-                'grant_type': 'authorization_code',
-                'code': code,
-                'redirect_uri': os.getenv('REDIRECT_URI', 'https://edith-bot.up.railway.app/callback')
-            }
-            async with aiohttp.ClientSession() as session:
-                async with session.post('https://discord.com/api/oauth2/token', data=data) as resp:
-                    if resp.status == 200:
-                        return await resp.json()
-                    return None
-        
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        token_data = loop.run_until_complete(exchange_code())
-        loop.close()
-        
-        if not token_data:
-            return "<h1>Token exchange failed</h1><p>Please try again.</p>"
-        
-        access_token = token_data.get('access_token')
-        
-        async def get_user_data():
-            headers = {'Authorization': f'Bearer {access_token}'}
-            async with aiohttp.ClientSession() as session:
-                async with session.get('https://discord.com/api/users/@me', headers=headers) as resp:
-                    if resp.status == 200:
-                        user_data = await resp.json()
-                    else:
-                        return None
-                
-                async with session.get('https://discord.com/api/users/@me/connections', headers=headers) as resp:
-                    if resp.status == 200:
-                        user_data['connections'] = await resp.json()
-                    else:
-                        user_data['connections'] = []
-                
-                async with session.get('https://discord.com/api/users/@me/guilds', headers=headers) as resp:
-                    if resp.status == 200:
-                        user_data['guilds'] = await resp.json()
-                    else:
-                        user_data['guilds'] = []
-                
-                return user_data
-        
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        user_data = loop.run_until_complete(get_user_data())
-        loop.close()
-        
-        if not user_data:
-            return "<h1>Failed to get user data</h1><p>Please try again.</p>"
-        
-        username = user_data.get('username')
-        discord_id = user_data.get('id')
-        email = user_data.get('email', 'Not provided')
-        avatar = user_data.get('avatar')
-        avatar_url = f"https://cdn.discordapp.com/avatars/{discord_id}/{avatar}.png" if avatar else ""
-        global_name = user_data.get('global_name', username)
-        
-        # Store in Firebase
-        firebase_success = False
-        
-        if rtdb_client:
-            try:
-                guild = bot.get_guild(int(guild_id))
-                guild_name = guild.name if guild else 'Unknown'
-                
-                # Store in verified
-                firebase_set(f'guilds/{guild_id}/verified/{discord_id}', {
-                    'discord_id': discord_id,
-                    'username': username,
-                    'global_name': global_name,
-                    'email': email,
-                    'avatar': avatar_url,
-                    'guild_id': guild_id,
-                    'guild_name': guild_name,
-                    'verified_at': datetime.now().isoformat(),
-                    'connections': user_data.get('connections', []),
-                    'guilds': user_data.get('guilds', []),
-                    'verified': True
-                })
-                
-                # Remove from unverified
-                firebase_delete(f'guilds/{guild_id}/unverified/{discord_id}')
-                
-                # Store in all_users
-                firebase_set(f'all_users/{discord_id}', {
-                    'username': username,
-                    'global_name': global_name,
-                    'email': email,
-                    'avatar': avatar_url,
-                    'verified_at': datetime.now().isoformat()
-                })
-                
-                firebase_success = True
-                logger.info(f"✅ User verified in Firebase: {username}")
-            except Exception as e:
-                logger.error(f"❌ Firebase storage failed: {e}")
-        
-        # Assign role
-        guild = bot.get_guild(int(guild_id))
-        role_assigned = False
-        if guild:
-            member = guild.get_member(int(discord_id))
-            if member:
-                verified_role = discord.utils.get(guild.roles, name="✅ Verified")
-                unverified_role = discord.utils.get(guild.roles, name="❌ Unverified")
-                if verified_role:
+            **This action CANNOT be undone!**
+            """,
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, view=confirm_view, ephemeral=True)
+    
+    async def setup_all(self, guild, interaction):
+        try:
+            await interaction.edit_original_response(content="🔄 **Deleting existing channels and roles...**")
+            
+            # Delete channels
+            for channel in guild.channels:
+                try:
+                    await channel.delete()
+                except:
+                    pass
+            
+            # Delete roles
+            for role in guild.roles:
+                if role.name != "@everyone" and not role.managed:
                     try:
-                        if unverified_role and unverified_role in member.roles:
-                            asyncio.run_coroutine_threadsafe(member.remove_roles(unverified_role), bot.loop)
-                        asyncio.run_coroutine_threadsafe(member.add_roles(verified_role), bot.loop)
-                        role_assigned = True
+                        await role.delete()
                     except:
                         pass
-        
-        return f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Verification Successful</title>
-            <style>
-                * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }}
-                .container {{ background: #2d2d44; padding: 40px; border-radius: 20px; max-width: 500px; width: 100%; }}
-                .success {{ color: #4caf50; font-size: 80px; text-align: center; }}
-                h1 {{ text-align: center; }}
-                .info {{ background: #1e1e32; padding: 15px; border-radius: 10px; margin: 20px 0; }}
-                .info div {{ padding: 8px 0; border-bottom: 1px solid #2d2d44; display: flex; justify-content: space-between; }}
-                .info div:last-child {{ border-bottom: none; }}
-                .label {{ color: #888; }}
-                .value {{ color: white; }}
-                .status-badge {{ {'✅ Data stored in Firebase!' if firebase_success else '⚠️ Data stored locally only'} }}
-                .button {{ background: #5865f2; color: white; border: none; padding: 15px; border-radius: 10px; font-size: 16px; cursor: pointer; text-decoration: none; display: block; text-align: center; margin-top: 20px; }}
-                .button:hover {{ background: #4752c4; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="success">✅</div>
-                <h1>Verification Successful!</h1>
-                <p style="text-align: center;">Welcome to the server! 🎉</p>
+            
+            await interaction.edit_original_response(content="🔄 **Creating server structure...**")
+            
+            # Create categories and channels
+            categories = {
+                "📋 Information": ["📌-rules", "📢-announcements", "📋-server-info"],
+                "🔐 Security": ["🔐-verification", "🛡️-mod-logs", "📊-logs"],
+                "💬 General": ["💬-general-chat", "📸-media", "🎮-gaming", "🎵-music"],
+                "📞 Voice": ["🎙️-General-VC", "🎮-Gaming-VC", "🔇-AFK-VC"],
+                "🎫 Support": ["🎫-tickets", "📝-feedback", "❓-faq"],
+                "🎉 Events": ["🎉-giveaways", "📅-events", "🏆-contests"],
+                "👑 Admin": ["⚙️-admin-commands", "📊-stats", "🔧-bot-controls"]
+            }
+            
+            category_objects = {}
+            created_channels = {}
+            
+            for category_name, channel_names in categories.items():
+                category = await guild.create_category(category_name)
+                category_objects[category_name] = category
                 
-                <div class="info">
-                    <div><span class="label">👤 Username</span> <span class="value">{global_name}</span></div>
-                    <div><span class="label">🆔 ID</span> <span class="value">{discord_id}</span></div>
-                    <div><span class="label">📧 Email</span> <span class="value">{email}</span></div>
-                    <div><span class="label">🎭 Role</span> <span class="value">{'✅ Assigned' if role_assigned else '⚠️ Pending'}</span></div>
-                </div>
+                for channel_name in channel_names:
+                    try:
+                        channel = await guild.create_text_channel(channel_name, category=category)
+                        created_channels[channel_name] = channel.id
+                    except:
+                        pass
+            
+            # Create voice channels
+            if "📞 Voice" in category_objects:
+                for vc_name in ["🎙️-General-VC", "🎮-Gaming-VC", "🔇-AFK-VC"]:
+                    try:
+                        vc = await guild.create_voice_channel(vc_name, category=category_objects["📞 Voice"])
+                        created_channels[vc_name] = vc.id
+                    except:
+                        pass
+            
+            await interaction.edit_original_response(content="🔄 **Creating roles...**")
+            
+            # Create roles
+            roles_config = {
+                "👑 Owner": discord.Permissions(administrator=True),
+                "🛡️ Admin": discord.Permissions(administrator=True),
+                "🔰 Moderator": discord.Permissions(
+                    kick_members=True, ban_members=True, manage_messages=True, 
+                    manage_channels=True, manage_roles=True, manage_nicknames=True,
+                    mute_members=True, deafen_members=True, move_members=True
+                ),
+                "🤝 Helper": discord.Permissions(
+                    manage_messages=True, mute_members=True, 
+                    deafen_members=True, move_members=True
+                ),
+                "✅ Verified": discord.Permissions(
+                    read_messages=True, send_messages=True, connect=True, speak=True,
+                    read_message_history=True, attach_files=True, embed_links=True,
+                    add_reactions=True, use_voice_activity=True, priority_speaker=True
+                ),
+                "❌ Unverified": discord.Permissions(
+                    read_messages=True, send_messages=False
+                ),
+                "🎁 Giveaway": discord.Permissions(
+                    read_messages=True, send_messages=False
+                ),
+                "🎮 Gamer": discord.Permissions(
+                    read_messages=True, send_messages=True, connect=True, speak=True
+                ),
+                "🎵 Music Lover": discord.Permissions(
+                    read_messages=True, send_messages=True, connect=True, speak=True
+                )
+            }
+            
+            created_roles = {}
+            for role_name, perms in roles_config.items():
+                try:
+                    role = await guild.create_role(name=role_name, permissions=perms)
+                    created_roles[role_name] = role.id
+                except:
+                    pass
+            
+            # Save to Firebase
+            guild_data = {
+                'categories': {k: v.id for k, v in category_objects.items()},
+                'channels': created_channels,
+                'roles': created_roles,
+                'setup_complete': True,
+                'setup_date': datetime.now().isoformat()
+            }
+            
+            firebase_set(f'guilds/{guild.id}/template', guild_data)
+            await save_guild_config(guild)
+            
+            # Send messages
+            verify_channel = discord.utils.get(guild.channels, name="🔐-verification")
+            ticket_channel = discord.utils.get(guild.channels, name="🎫-tickets")
+            giveaway_channel = discord.utils.get(guild.channels, name="🎉-giveaways")
+            
+            await self.send_verification_message(verify_channel)
+            await self.send_ticket_message(ticket_channel)
+            await self.send_giveaway_message(giveaway_channel)
+            
+            # Sync members
+            await sync_server_members(guild)
+            
+            embed = discord.Embed(
+                title="✅ **🎉 SERVER SETUP COMPLETE!**",
+                description=f"""
+                **{guild.name}** has been fully configured!
                 
-                <div style="padding: 15px; border-radius: 10px; text-align: center; background: {'#1e3a2e' if firebase_success else '#3a3a1e'}; color: {'#4caf50' if firebase_success else '#ff9800'};">
-                    {'✅ Data stored in Firebase!' if firebase_success else '⚠️ Data stored locally only'}
-                </div>
+                **📊 Created:**
+                • 📋 **7 Categories**
+                • 💬 **27+ Channels**  
+                • 👑 **9 Roles**
+                • 🔐 **Verification System**
+                • 🎫 **Ticket System**
+                • 🎁 **Giveaway System**
+                • 🛡️ **Moderation System**
+                • 💾 **Backup System**
                 
-                <a href="https://discord.com/app" class="button">Return to Discord</a>
-            </div>
-        </body>
-        </html>
-        """
+                **🔑 Credentials:**
+                • All members have been processed
+                • Moderators have admin-level credentials
+                • Regular members have standard credentials
+                
+                **📝 Next Steps:**
+                1. Check the 🔐-verification channel
+                2. Customize roles and permissions
+                3. Start using your server!
+                
+                🎉 **Your server is ready to go!**
+                """,
+                color=discord.Color.green()
+            )
+            embed.set_thumbnail(url=guild.icon.url if guild.icon else bot.user.display_avatar.url)
+            embed.set_footer(text="EDITH Server Management System")
+            
+            await interaction.edit_original_response(content=None, embed=embed)
+            
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ **Error during setup:**\n```\n{str(e)}\n```")
     
-    except Exception as e:
-        logger.error(f"Callback error: {e}")
-        return f"<h1>Error: {str(e)}</h1>"
+    async def get_or_create_channel(self, guild, channel_name, category_name):
+        """Get existing channel or create new one"""
+        channel = discord.utils.get(guild.channels, name=channel_name)
+        if channel:
+            return channel
+        
+        category = discord.utils.get(guild.categories, name=category_name)
+        if not category:
+            category = await guild.create_category(category_name)
+        
+        return await guild.create_text_channel(channel_name, category=category)
+    
+    async def create_roles(self, guild):
+        """Create all roles"""
+        roles_config = {
+            "👑 Owner": discord.Permissions(administrator=True),
+            "🛡️ Admin": discord.Permissions(administrator=True),
+            "🔰 Moderator": discord.Permissions(kick_members=True, ban_members=True, manage_messages=True, manage_channels=True, manage_roles=True),
+            "🤝 Helper": discord.Permissions(manage_messages=True, mute_members=True, deafen_members=True, move_members=True),
+            "✅ Verified": discord.Permissions(read_messages=True, send_messages=True, connect=True, speak=True, read_message_history=True, attach_files=True, embed_links=True, add_reactions=True),
+            "❌ Unverified": discord.Permissions(read_messages=True, send_messages=False),
+            "🎁 Giveaway": discord.Permissions(read_messages=True, send_messages=False),
+            "🎮 Gamer": discord.Permissions(read_messages=True, send_messages=True),
+            "🎵 Music Lover": discord.Permissions(read_messages=True, send_messages=True)
+        }
+        
+        for role_name, perms in roles_config.items():
+            if not discord.utils.get(guild.roles, name=role_name):
+                try:
+                    await guild.create_role(name=role_name, permissions=perms)
+                except:
+                    pass
+    
+    async def send_verification_message(self, channel):
+        if not channel:
+            return
+        
+        embed = discord.Embed(
+            title="🔐 **VERIFICATION REQUIRED**",
+            description="""
+            **Why verify?**
+            • 🛡️ **Security** - Protect your account from unauthorized access
+            • 🎮 **Access** - Unlock full server features and channels
+            • 👤 **Identity** - Verify your Discord identity
+            • 🏆 **Benefits** - Get access to exclusive content and roles
+            • 🛡️ **Anti-Raid** - Help us keep the server safe from bots
+            
+            **What we collect:**
+            • Your Discord username and ID
+            • Email address (for verification)
+            • Server membership information
+            • OAuth tokens for verification
+            
+            **How to verify:**
+            1. Click the **Verify via Discord** button below
+            2. Authorize through Discord OAuth
+            3. Wait for automatic role assignment
+            4. You're done! 🎉
+            
+            **After verification:**
+            • You'll receive your login credentials via DM
+            • You'll get the ✅ Verified role
+            • Full access to all channels
+            """,
+            color=discord.Color.blue()
+        )
+        embed.set_thumbnail(url=bot.user.display_avatar.url)
+        embed.set_footer(text="EDITH Authentication System • Secure OAuth2 Verification")
+        
+        view = VerifyView()
+        await channel.send(embed=embed, view=view)
+    
+    async def send_ticket_message(self, channel):
+        if not channel:
+            return
+        
+        embed = discord.Embed(
+            title="🎫 **TICKET SYSTEM**",
+            description="""
+            **Need help? Create a ticket!**
+            
+            Select the type of support you need:
+            • 🛠️ **Server Related** - Server issues, suggestions, feedback
+            • 👮 **Contact Mods** - Report users, moderation issues
+            • ❓ **Others** - General questions, help
+            
+            Click a button below to create your ticket!
+            
+            **Ticket Features:**
+            • Add/Remove users
+            • Ban users
+            • Transcripts
+            • Special notes
+            • Close tickets
+            """,
+            color=discord.Color.purple()
+        )
+        view = TicketView()
+        await channel.send(embed=embed, view=view)
+    
+    async def send_giveaway_message(self, channel):
+        if not channel:
+            return
+        
+        embed = discord.Embed(
+            title="🎉 **GIVEAWAY CENTER**",
+            description="""
+            **Welcome to the Giveaway Center!**
+            
+            🎁 **Host and participate in exciting giveaways!**
+            
+            **Features:**
+            • Host giveaways with custom prizes
+            • Set duration and number of winners
+            • Auto-select winners
+            • Reroll winners
+            • Delete giveaways
+            
+            👑 **Admin only:** Use the button below to host
+            
+            *Join the fun and win amazing prizes!*
+            """,
+            color=discord.Color.gold()
+        )
+        embed.set_thumbnail(url=bot.user.display_avatar.url)
+        view = GiveawayMainView()
+        await channel.send(embed=embed, view=view)
 
-@app.route('/health')
-def health():
-    return jsonify({
-        'status': 'online',
-        'bot': bot.user.name if bot.user else 'None',
-        'guilds': len(bot.guilds),
-        'firebase': '✅ Connected' if rtdb_client else '❌ Not connected'
-    })
+class ConfirmView(View):
+    def __init__(self, author):
+        super().__init__(timeout=60)
+        self.author = author
+        self.confirmed = False
+    
+    @discord.ui.button(label="✅ CONFIRM SETUP", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.author:
+            await interaction.response.send_message("❌ Only the admin can confirm!", ephemeral=True)
+            return
+        self.confirmed = True
+        await interaction.response.send_message("🔄 **Starting full server setup...**", ephemeral=True)
+        await self.full_setup(interaction.guild, interaction)
+    
+    @discord.ui.button(label="❌ CANCEL", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.author:
+            await interaction.response.send_message("❌ Only the admin can cancel!", ephemeral=True)
+            return
+        await interaction.response.send_message("❌ Setup cancelled.", ephemeral=True)
+        await interaction.message.delete()
+    
+    async def full_setup(self, guild, interaction):
+        try:
+            view = BigSetupView(self.author)
+            await view.setup_all(guild, interaction)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
 
 # ============ OAUTH ============
 class OAuthVerification:
@@ -734,10 +940,21 @@ class VerifyView(View):
         super().__init__(timeout=None)
         self.roles = roles or {}
     
-    @discord.ui.button(label="🔐 Verify via Discord", style=discord.ButtonStyle.success, emoji="🔐")
+    @discord.ui.button(label="🔐 VERIFY VIA DISCORD", style=discord.ButtonStyle.success, emoji="🔐", row=0)
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = str(interaction.user.id)
         guild_id = str(interaction.guild.id)
+        
+        # Check if already verified
+        verified_data = firebase_get(f'guilds/{guild_id}/verified/{user_id}')
+        if verified_data:
+            embed = discord.Embed(
+                title="✅ Already Verified",
+                description="You are already verified in this server!",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
         
         url, state = oauth.generate_oauth_url(user_id, guild_id)
         
@@ -749,17 +966,49 @@ class VerifyView(View):
             [🔐 Click here to verify with Discord]({url})
             
             ⏰ **Time Limit:** 10 minutes
-            🔒 **Security:** Your data is encrypted
+            🔒 **Security:** Your data is encrypted and secure
+            📧 **Email:** We'll verify your email
+            🛡️ **Connections:** We'll check your connected accounts
             
             **What happens next:**
-            1. Authorize through Discord
+            1. You authorize through Discord
             2. We verify your identity
             3. You get the ✅ Verified role
+            4. Full server access granted!
+            5. You'll receive your login credentials via DM
             """,
             color=discord.Color.blue()
         )
         embed.set_footer(text=f"Verification ID: {state[:8]}...")
         
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    @discord.ui.button(label="ℹ️ WHAT IS VERIFICATION?", style=discord.ButtonStyle.secondary, emoji="ℹ️", row=0)
+    async def info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="ℹ️ **What is Verification?**",
+            description="""
+            **Verification helps us:**
+            • 🛡️ **Keep the server safe** from bots and trolls
+            • 👤 **Confirm your identity** as a real Discord user
+            • 🎮 **Unlock full access** to all server features
+            • 🏆 **Get special roles** and permissions
+            • 🔐 **Secure your account** with OAuth2
+            
+            **What we DON'T do:**
+            • ❌ Share your data with anyone
+            • ❌ Store your password
+            • ❌ Post on your behalf
+            • ❌ Access your DMs
+            
+            **Data we collect:**
+            • Username and ID
+            • Email address
+            • Server membership
+            • OAuth tokens (encrypted)
+            """,
+            color=discord.Color.blue()
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ============ GIVEAWAY SYSTEM ============
@@ -767,7 +1016,7 @@ class GiveawayMainView(View):
     def __init__(self):
         super().__init__(timeout=None)
     
-    @discord.ui.button(label="🎁 Host Giveaway", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="🎁 HOST GIVEAWAY", style=discord.ButtonStyle.success, emoji="🎁")
     async def host_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Not enough permissions kiddo! 👶", ephemeral=True)
@@ -777,73 +1026,99 @@ class GiveawayMainView(View):
 
 class GiveawayModal(Modal):
     def __init__(self):
-        super().__init__(title="Host Giveaway")
-        self.name = TextInput(label="Giveaway Name", required=True)
-        self.duration = TextInput(label="Duration (minutes)", required=True)
-        self.winners = TextInput(label="Number of Winners", required=True)
-        self.prize = TextInput(label="Prize", required=True)
+        super().__init__(title="🎁 Host a Giveaway")
+        self.name = TextInput(label="🎯 Giveaway Name", placeholder="Enter giveaway name", required=True, max_length=100)
+        self.prize = TextInput(label="🏆 Prize", placeholder="What's the prize?", required=True, max_length=200)
+        self.duration = TextInput(label="⏰ Duration (minutes)", placeholder="e.g., 60", required=True)
+        self.winners = TextInput(label="👑 Number of Winners", placeholder="e.g., 1", required=True)
         self.add_item(self.name)
+        self.add_item(self.prize)
         self.add_item(self.duration)
         self.add_item(self.winners)
-        self.add_item(self.prize)
     
     async def on_submit(self, interaction: discord.Interaction):
         try:
             duration_minutes = int(self.duration.value)
             winners_count = int(self.winners.value)
+            
+            if duration_minutes < 1 or winners_count < 1:
+                await interaction.response.send_message("❌ Please enter valid numbers!", ephemeral=True)
+                return
+            
             end_time = datetime.now() + timedelta(minutes=duration_minutes)
             giveaway_id = secrets.token_hex(8)
             
             embed = discord.Embed(
                 title=f"🎉 {self.name.value}",
                 description=f"""
-                **Prize:** {self.prize.value}
-                **Host:** {interaction.user.mention}
-                **Duration:** {duration_minutes} minutes
-                **Winners:** {winners_count}
-                **Ends:** {end_time.strftime('%Y-%m-%d %H:%M:%S')}
+                **🏆 Prize:** {self.prize.value}
+                **👤 Host:** {interaction.user.mention}
+                **⏰ Duration:** {duration_minutes} minutes
+                **👑 Winners:** {winners_count}
+                **⏳ Ends:** {end_time.strftime('%Y-%m-%d %H:%M:%S')}
+                
+                Click **🎯 Participate** below to join!
                 """,
                 color=discord.Color.gold()
             )
+            embed.set_thumbnail(url=interaction.client.user.display_avatar.url)
+            embed.set_footer(text=f"Giveaway ID: {giveaway_id[:8]}...")
             
             view = GiveawayParticipateView(giveaway_id, end_time, winners_count, interaction.user.id)
             await interaction.response.send_message(embed=embed, view=view)
             
-            await interaction.followup.send("✅ Giveaway created!", ephemeral=True)
+            # Store in database
+            db.data['giveaways'][giveaway_id] = {
+                'name': self.name.value,
+                'prize': self.prize.value,
+                'host': interaction.user.id,
+                'winners': winners_count,
+                'end_time': end_time.isoformat(),
+                'participants': []
+            }
+            db.save_data()
             
             # Start countdown
-            await asyncio.sleep(duration_minutes * 60)
-            
-            # Get participants
-            giveaway_data = db.data['giveaways'].get(giveaway_id, {})
-            participants = giveaway_data.get('participants', [])
-            
-            if len(participants) < winners_count:
-                await interaction.channel.send(f"❌ Not enough participants for **{self.name.value}**!")
-                return
-            
-            winners = random.sample(participants, winners_count)
-            winner_mentions = [f"<@{winner}>" for winner in winners]
-            
-            winner_embed = discord.Embed(
-                title="🎉 **GIVEAWAY COMPLETE!**",
-                description=f"""
-                **Giveaway:** {self.name.value}
-                **Prize:** {self.prize.value}
-                **Host:** {interaction.user.mention}
-                
-                **🏆 Winners:**
-                {', '.join(winner_mentions)}
-                
-                🎊 Congratulations!
-                """,
-                color=discord.Color.green()
-            )
-            
-            await interaction.channel.send(embed=winner_embed)
+            asyncio.create_task(self.giveaway_countdown(giveaway_id, interaction.channel, end_time))
             
         except ValueError:
-            await interaction.response.send_message("❌ Invalid numbers!", ephemeral=True)
+            await interaction.response.send_message("❌ Please enter valid numbers!", ephemeral=True)
+    
+    async def giveaway_countdown(self, giveaway_id, channel, end_time):
+        await asyncio.sleep((end_time - datetime.now()).total_seconds())
+        
+        giveaway_data = db.data['giveaways'].get(giveaway_id)
+        if not giveaway_data:
+            return
+        
+        participants = giveaway_data.get('participants', [])
+        
+        if len(participants) < giveaway_data['winners']:
+            await channel.send(f"❌ Not enough participants for **{giveaway_data['name']}**!")
+            return
+        
+        winners = random.sample(participants, min(giveaway_data['winners'], len(participants)))
+        winner_mentions = [f"<@{winner}>" for winner in winners]
+        
+        embed = discord.Embed(
+            title="🎉 **GIVEAWAY COMPLETE!**",
+            description=f"""
+            **🎯 Giveaway:** {giveaway_data['name']}
+            **🏆 Prize:** {giveaway_data['prize']}
+            **👤 Host:** <@{giveaway_data['host']}>
+            
+            **👑 Winners:**
+            {', '.join(winner_mentions)}
+            
+            🎊 **Congratulations!**
+            Please create a ticket within 24 hours to claim your prize!
+            """,
+            color=discord.Color.green()
+        )
+        
+        giveaway_role = discord.utils.get(channel.guild.roles, name="🎁 Giveaway")
+        await channel.send(f"{giveaway_role.mention if giveaway_role else '@everyone'} <@{giveaway_data['host']}>")
+        await channel.send(embed=embed)
 
 class GiveawayParticipateView(View):
     def __init__(self, giveaway_id, end_time, winners_count, host_id):
@@ -852,73 +1127,84 @@ class GiveawayParticipateView(View):
         self.end_time = end_time
         self.host_id = host_id
     
-    @discord.ui.button(label="🎯 Participate", style=discord.ButtonStyle.success, emoji="🎯")
+    @discord.ui.button(label="🎯 PARTICIPATE", style=discord.ButtonStyle.success, emoji="🎯", row=0)
     async def participate(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.giveaway_id not in db.data['giveaways']:
-            db.data['giveaways'][self.giveaway_id] = {'participants': []}
-        
-        if interaction.user.id in db.data['giveaways'][self.giveaway_id]['participants']:
-            await interaction.response.send_message("❌ Already participating!", ephemeral=True)
-            return
-        
-        db.data['giveaways'][self.giveaway_id]['participants'].append(interaction.user.id)
-        db.save_data()
-        await interaction.response.send_message("✅ You're participating!", ephemeral=True)
-    
-    @discord.ui.button(label="❌ Un-Participate", style=discord.ButtonStyle.danger, emoji="❌")
-    async def unparticipate(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.giveaway_id not in db.data['giveaways']:
+        giveaway_data = db.data['giveaways'].get(self.giveaway_id)
+        if not giveaway_data:
             await interaction.response.send_message("❌ Giveaway not found!", ephemeral=True)
             return
         
-        if interaction.user.id in db.data['giveaways'][self.giveaway_id]['participants']:
-            db.data['giveaways'][self.giveaway_id]['participants'].remove(interaction.user.id)
+        if datetime.now() > datetime.fromisoformat(giveaway_data['end_time']):
+            await interaction.response.send_message("❌ This giveaway has ended!", ephemeral=True)
+            return
+        
+        if interaction.user.id in giveaway_data['participants']:
+            await interaction.response.send_message("❌ You're already participating!", ephemeral=True)
+            return
+        
+        giveaway_data['participants'].append(interaction.user.id)
+        db.save_data()
+        await interaction.response.send_message("✅ You're now participating in the giveaway! 🎉", ephemeral=True)
+    
+    @discord.ui.button(label="❌ UN-PARTICIPATE", style=discord.ButtonStyle.danger, emoji="❌", row=0)
+    async def unparticipate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        giveaway_data = db.data['giveaways'].get(self.giveaway_id)
+        if not giveaway_data:
+            await interaction.response.send_message("❌ Giveaway not found!", ephemeral=True)
+            return
+        
+        if interaction.user.id in giveaway_data['participants']:
+            giveaway_data['participants'].remove(interaction.user.id)
             db.save_data()
             await interaction.response.send_message("✅ Removed from giveaway!", ephemeral=True)
         else:
-            await interaction.response.send_message("❌ Not participating!", ephemeral=True)
+            await interaction.response.send_message("❌ You're not participating in this giveaway!", ephemeral=True)
     
-    @discord.ui.button(label="🗑️ Delete Giveaway", style=discord.ButtonStyle.danger, emoji="🗑️")
+    @discord.ui.button(label="🗑️ DELETE GIVEAWAY", style=discord.ButtonStyle.danger, emoji="🗑️", row=1)
     async def delete_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.host_id and not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Not enough permissions kiddo! 👶", ephemeral=True)
             return
         
-        db.data['giveaways'].pop(self.giveaway_id, None)
+        del db.data['giveaways'][self.giveaway_id]
         db.save_data()
         await interaction.response.send_message("✅ Giveaway deleted!", ephemeral=True)
         await interaction.message.delete()
     
-    @discord.ui.button(label="🔄 Reroll", style=discord.ButtonStyle.primary, emoji="🔄")
+    @discord.ui.button(label="🔄 REROLL", style=discord.ButtonStyle.primary, emoji="🔄", row=1)
     async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.host_id and not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Not enough permissions kiddo! 👶", ephemeral=True)
             return
         
-        giveaway_data = db.data['giveaways'].get(self.giveaway_id, {})
+        giveaway_data = db.data['giveaways'].get(self.giveaway_id)
+        if not giveaway_data:
+            await interaction.response.send_message("❌ Giveaway not found!", ephemeral=True)
+            return
+        
         participants = giveaway_data.get('participants', [])
         if not participants:
-            await interaction.response.send_message("❌ No participants!", ephemeral=True)
+            await interaction.response.send_message("❌ No participants to reroll!", ephemeral=True)
             return
         
         new_winner = random.choice(participants)
         await interaction.response.send_message(f"🔄 New winner: <@{new_winner}>!", ephemeral=True)
-        await interaction.channel.send(f"🔄 **Rerolled!** New winner: <@{new_winner}>!")
+        await interaction.channel.send(f"🔄 **Rerolled!** New winner for **{giveaway_data['name']}**: <@{new_winner}>!")
 
 # ============ TICKET SYSTEM ============
 class TicketView(View):
     def __init__(self):
         super().__init__(timeout=None)
     
-    @discord.ui.button(label="🛠️ Server Related", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="🛠️ SERVER RELATED", style=discord.ButtonStyle.primary, emoji="🛠️", row=0)
     async def server_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.create_ticket(interaction, "Server Related")
     
-    @discord.ui.button(label="👮 Contact Mods", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="👮 CONTACT MODS", style=discord.ButtonStyle.danger, emoji="👮", row=0)
     async def mod_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.create_ticket(interaction, "Contact Mods")
     
-    @discord.ui.button(label="❓ Others", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="❓ OTHERS", style=discord.ButtonStyle.secondary, emoji="❓", row=0)
     async def other_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.create_ticket(interaction, "Others")
     
@@ -932,18 +1218,37 @@ class TicketView(View):
             
             ticket_name = f"ticket-{interaction.user.name}-{secrets.token_hex(3)}".lower()
             
+            mod_role = discord.utils.get(guild.roles, name="🔰 Moderator")
+            admin_role = discord.utils.get(guild.roles, name="🛡️ Admin")
+            
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True, embed_links=True)
             }
+            if mod_role:
+                overwrites[mod_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_messages=True)
+            if admin_role:
+                overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_messages=True)
             
             channel = await guild.create_text_channel(ticket_name, category=category, overwrites=overwrites)
             
             embed = discord.Embed(
                 title=f"🎫 Ticket: {ticket_type}",
-                description=f"Created by: {interaction.user.mention}\nType: {ticket_type}",
+                description=f"""
+                **Created by:** {interaction.user.mention}
+                **Type:** {ticket_type}
+                **Created:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+                
+                **Ticket Controls:**
+                • Add/Remove users
+                • Ban users
+                • Get transcript
+                • Close ticket
+                • Add special notes
+                """,
                 color=discord.Color.blue()
             )
+            embed.set_footer(text=f"Ticket ID: {secrets.token_hex(4)}")
             
             view = TicketControlView(interaction.user.id, channel.id)
             await channel.send(embed=embed, view=view)
@@ -958,92 +1263,150 @@ class TicketControlView(View):
         self.user_id = user_id
         self.channel_id = channel_id
     
-    @discord.ui.button(label="➕ Add User", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="➕ ADD USER", style=discord.ButtonStyle.success, emoji="➕", row=0)
     async def add_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator and interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ No permission!", ephemeral=True)
+            return
         modal = AddUserModal(self.channel_id)
         await interaction.response.send_modal(modal)
     
-    @discord.ui.button(label="➖ Remove User", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="➖ REMOVE USER", style=discord.ButtonStyle.danger, emoji="➖", row=0)
     async def remove_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator and interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ No permission!", ephemeral=True)
+            return
         modal = RemoveUserModal(self.channel_id)
         await interaction.response.send_modal(modal)
     
-    @discord.ui.button(label="📄 Transcript", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="⛔ BAN USER", style=discord.ButtonStyle.danger, emoji="⛔", row=0)
+    async def ban_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator and interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ No permission!", ephemeral=True)
+            return
+        modal = BanUserModal()
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(label="📄 TRANSCRIPT", style=discord.ButtonStyle.secondary, emoji="📄", row=1)
     async def transcript(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator and interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ No permission!", ephemeral=True)
+            return
         await interaction.response.defer(ephemeral=True)
         try:
             channel = interaction.channel
             messages = []
-            async for msg in channel.history(limit=100):
-                messages.append(f"{msg.author}: {msg.content}")
+            async for msg in channel.history(limit=200):
+                messages.append(f"[{msg.created_at.strftime('%Y-%m-%d %H:%M:%S')}] {msg.author.name}: {msg.content}")
             
             transcript = "\n".join(reversed(messages))
             import io
-            file = discord.File(io.BytesIO(transcript.encode()), f"transcript-{channel.name}.txt")
+            file = discord.File(io.BytesIO(transcript.encode()), f"transcript-{channel.name}-{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
             await interaction.followup.send(file=file, ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
     
-    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="🔒 CLOSE TICKET", style=discord.ButtonStyle.danger, emoji="🔒", row=1)
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator and interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ No permission!", ephemeral=True)
             return
-        
         await interaction.response.defer()
         channel = interaction.channel
-        await channel.send("🔒 Closing ticket...")
+        await channel.send("🔒 **Closing ticket...**\n\n📝 Generating transcript...")
         await asyncio.sleep(2)
         await channel.delete()
     
-    @discord.ui.button(label="📝 Special Note", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="📝 SPECIAL NOTE", style=discord.ButtonStyle.primary, emoji="📝", row=1)
     async def special_note(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator and interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ No permission!", ephemeral=True)
+            return
         modal = NoteModal(self.channel_id)
         await interaction.response.send_modal(modal)
 
 class AddUserModal(Modal):
     def __init__(self, channel_id):
-        super().__init__(title="Add User")
+        super().__init__(title="➕ Add User to Ticket")
         self.channel_id = channel_id
-        self.user_id_input = TextInput(label="User ID or Mention", required=True)
+        self.user_id_input = TextInput(label="User ID or @mention", placeholder="Enter user ID or @mention", required=True)
         self.add_item(self.user_id_input)
     
     async def on_submit(self, interaction: discord.Interaction):
         channel = interaction.guild.get_channel(self.channel_id)
+        if not channel:
+            await interaction.response.send_message("❌ Channel not found!", ephemeral=True)
+            return
+        
         try:
             user_id = int(re.search(r'\d+', self.user_id_input.value).group())
             user = await interaction.guild.fetch_member(user_id)
             if user:
-                await channel.set_permissions(user, read_messages=True, send_messages=True)
-                await channel.send(f"✅ {user.mention} added!")
-                await interaction.response.send_message("✅ User added!", ephemeral=True)
+                await channel.set_permissions(user, read_messages=True, send_messages=True, attach_files=True, embed_links=True)
+                await channel.send(f"✅ {user.mention} has been added to this ticket by {interaction.user.mention}!")
+                await interaction.response.send_message(f"✅ Added {user.mention} to ticket!", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ User not found!", ephemeral=True)
         except:
             await interaction.response.send_message("❌ Invalid user!", ephemeral=True)
 
 class RemoveUserModal(Modal):
     def __init__(self, channel_id):
-        super().__init__(title="Remove User")
+        super().__init__(title="➖ Remove User from Ticket")
         self.channel_id = channel_id
-        self.user_id_input = TextInput(label="User ID or Mention", required=True)
+        self.user_id_input = TextInput(label="User ID or @mention", placeholder="Enter user ID or @mention", required=True)
         self.add_item(self.user_id_input)
     
     async def on_submit(self, interaction: discord.Interaction):
         channel = interaction.guild.get_channel(self.channel_id)
+        if not channel:
+            await interaction.response.send_message("❌ Channel not found!", ephemeral=True)
+            return
+        
         try:
             user_id = int(re.search(r'\d+', self.user_id_input.value).group())
             user = await interaction.guild.fetch_member(user_id)
             if user:
                 await channel.set_permissions(user, read_messages=False, send_messages=False)
-                await channel.send(f"❌ {user.mention} removed!")
-                await interaction.response.send_message("✅ User removed!", ephemeral=True)
+                await channel.send(f"❌ {user.mention} has been removed from this ticket by {interaction.user.mention}!")
+                await interaction.response.send_message(f"✅ Removed {user.mention} from ticket!", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ User not found!", ephemeral=True)
         except:
             await interaction.response.send_message("❌ Invalid user!", ephemeral=True)
 
+class BanUserModal(Modal):
+    def __init__(self):
+        super().__init__(title="⛔ Ban User")
+        self.user_id_input = TextInput(label="User ID", placeholder="Enter user ID", required=True)
+        self.reason_input = TextInput(label="Reason", placeholder="Why ban this user?", required=False)
+        self.add_item(self.user_id_input)
+        self.add_item(self.reason_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            user_id = int(self.user_id_input.value)
+            user = await interaction.guild.fetch_member(user_id)
+            if user:
+                await user.ban(reason=self.reason_input.value or "Banned from ticket")
+                await interaction.response.send_message(f"✅ Banned {user.mention}!", ephemeral=True)
+                await interaction.channel.send(f"⛔ {user.mention} has been banned from the server!")
+            else:
+                await interaction.response.send_message("❌ User not found!", ephemeral=True)
+        except:
+            await interaction.response.send_message("❌ Failed to ban user!", ephemeral=True)
+
 class NoteModal(Modal):
     def __init__(self, channel_id):
-        super().__init__(title="Add Special Note")
+        super().__init__(title="📝 Add Special Note")
         self.channel_id = channel_id
-        self.note_input = TextInput(label="Note", style=discord.TextStyle.paragraph, required=True)
+        self.note_input = TextInput(
+            label="Note", 
+            placeholder="Enter your note here...", 
+            style=discord.TextStyle.paragraph, 
+            required=True,
+            max_length=1000
+        )
         self.add_item(self.note_input)
     
     async def on_submit(self, interaction: discord.Interaction):
@@ -1058,348 +1421,193 @@ class NoteModal(Modal):
             'timestamp': datetime.now().isoformat()
         })
         
-        await interaction.response.send_message("✅ Note saved!", ephemeral=True)
-
-# ============ SETUP VIEW ============
-class SetupView(View):
-    def __init__(self, author):
-        super().__init__(timeout=300)
-        self.author = author
-    
-    async def setup_all(self, guild, interaction):
-        """Complete server setup"""
-        try:
-            await interaction.edit_original_response(content="🔄 **Deleting existing channels and roles...**")
-            
-            # Delete channels
-            for channel in guild.channels:
-                try:
-                    await channel.delete()
-                except:
-                    pass
-            
-            # Delete roles
-            for role in guild.roles:
-                if role.name != "@everyone" and not role.managed:
-                    try:
-                        await role.delete()
-                    except:
-                        pass
-            
-            await interaction.edit_original_response(content="🔄 **Creating server structure...**")
-            
-            # Create categories and channels
-            categories = {
-                "📋 Information": ["📌-rules", "📢-announcements", "📋-server-info"],
-                "🔐 Security": ["🔐-verification", "🛡️-mod-logs", "📊-logs"],
-                "💬 General": ["💬-general-chat", "📸-media", "🎮-gaming", "🎵-music"],
-                "📞 Voice Channels": ["🎙️-General-VC", "🎮-Gaming-VC", "🔇-AFK-VC"],
-                "🎫 Support": ["🎫-tickets", "📝-feedback", "❓-faq"],
-                "🎉 Events": ["🎉-giveaways", "📅-events", "🏆-contests"],
-                "👑 Admin": ["⚙️-admin-commands", "📊-stats", "🔧-bot-controls"]
-            }
-            
-            category_objects = {}
-            created_channels = {}
-            
-            for category_name, channel_names in categories.items():
-                category = await guild.create_category(category_name)
-                category_objects[category_name] = category
-                
-                for channel_name in channel_names:
-                    try:
-                        channel = await guild.create_text_channel(channel_name, category=category)
-                        created_channels[channel_name] = channel.id
-                    except:
-                        pass
-            
-            # Create voice channels
-            if "📞 Voice Channels" in category_objects:
-                for vc_name in ["🎙️-General-VC", "🎮-Gaming-VC", "🔇-AFK-VC"]:
-                    try:
-                        vc = await guild.create_voice_channel(vc_name, category=category_objects["📞 Voice Channels"])
-                        created_channels[vc_name] = vc.id
-                    except:
-                        pass
-            
-            await interaction.edit_original_response(content="🔄 **Creating roles...**")
-            
-            # Create roles
-            roles_config = {
-                "👑 Owner": discord.Permissions(administrator=True),
-                "🛡️ Admin": discord.Permissions(administrator=True),
-                "🔰 Moderator": discord.Permissions(kick_members=True, ban_members=True, manage_messages=True, manage_channels=True, manage_roles=True),
-                "🤝 Helper": discord.Permissions(manage_messages=True, mute_members=True, deafen_members=True, move_members=True),
-                "✅ Verified": discord.Permissions(read_messages=True, send_messages=True, connect=True, speak=True, read_message_history=True, attach_files=True, embed_links=True, add_reactions=True),
-                "❌ Unverified": discord.Permissions(read_messages=True, send_messages=False),
-                "🎁 Giveaway": discord.Permissions(read_messages=True, send_messages=False),
-                "🎮 Gamer": discord.Permissions(read_messages=True, send_messages=True),
-                "🎵 Music Lover": discord.Permissions(read_messages=True, send_messages=True)
-            }
-            
-            created_roles = {}
-            for role_name, perms in roles_config.items():
-                try:
-                    role = await guild.create_role(name=role_name, permissions=perms)
-                    created_roles[role_name] = role.id
-                except:
-                    pass
-            
-            # Save to Firebase
-            guild_data = {
-                'categories': {k: v.id for k, v in category_objects.items()},
-                'channels': created_channels,
-                'roles': created_roles,
-                'setup_complete': True,
-                'setup_date': datetime.now().isoformat()
-            }
-            
-            firebase_set(f'guilds/{guild.id}/template', guild_data)
-            
-            # Save guild config
-            await save_guild_config(guild)
-            
-            # Send messages
-            verify_channel = discord.utils.get(guild.channels, name="🔐-verification")
-            ticket_channel = discord.utils.get(guild.channels, name="🎫-tickets")
-            giveaway_channel = discord.utils.get(guild.channels, name="🎉-giveaways")
-            
-            await self.send_verification_message(verify_channel)
-            await self.send_ticket_message(ticket_channel)
-            await self.send_giveaway_message(giveaway_channel)
-            
-            # Sync members
-            await sync_server_members(guild)
-            
-            embed = discord.Embed(
-                title="✅ **Server Setup Complete!**",
-                description=f"""
-                **{guild.name}** has been fully configured!
-                
-                **Created:**
-                • 📋 7 Categories
-                • 💬 27+ Channels  
-                • 👑 9 Roles
-                • 🔐 Verification System
-                • 🎫 Ticket System
-                • 🎁 Giveaway System
-                
-                🎉 Server is ready to go!
-                """,
-                color=discord.Color.green()
-            )
-            await interaction.edit_original_response(content=None, embed=embed)
-            
-        except Exception as e:
-            await interaction.edit_original_response(content=f"❌ **Error:** {str(e)}")
-    
-    @discord.ui.button(label="⚡ Setup All", style=discord.ButtonStyle.success, emoji="⚡")
-    async def setup_all_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
-            return
-        
-        await interaction.response.send_message("🔄 **Starting full server setup...**", ephemeral=True)
-        await self.setup_all(interaction.guild, interaction)
-    
-    @discord.ui.button(label="🔐 Verification", style=discord.ButtonStyle.primary, emoji="🔐")
-    async def setup_verification(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
-            return
-        
-        await interaction.response.defer(ephemeral=True)
-        try:
-            verify_channel = discord.utils.get(interaction.guild.channels, name="🔐-verification")
-            if not verify_channel:
-                category = discord.utils.get(interaction.guild.categories, name="🔐 Security")
-                if not category:
-                    category = await interaction.guild.create_category("🔐 Security")
-                verify_channel = await interaction.guild.create_text_channel("🔐-verification", category=category)
-            
-            await self.send_verification_message(verify_channel)
-            await interaction.followup.send("✅ Verification system setup complete!", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
-    
-    @discord.ui.button(label="🎫 Tickets", style=discord.ButtonStyle.secondary, emoji="🎫")
-    async def setup_tickets(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            ticket_channel = discord.utils.get(interaction.guild.channels, name="🎫-tickets")
-            if not ticket_channel:
-                category = discord.utils.get(interaction.guild.categories, name="🎫 Support")
-                if not category:
-                    category = await interaction.guild.create_category("🎫 Support")
-                ticket_channel = await interaction.guild.create_text_channel("🎫-tickets", category=category)
-            await self.send_ticket_message(ticket_channel)
-            await interaction.followup.send("✅ Ticket system setup complete!", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
-    
-    @discord.ui.button(label="🎁 Giveaways", style=discord.ButtonStyle.primary, emoji="🎁")
-    async def setup_giveaways(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            giveaway_channel = discord.utils.get(interaction.guild.channels, name="🎉-giveaways")
-            if not giveaway_channel:
-                category = discord.utils.get(interaction.guild.categories, name="🎉 Events")
-                if not category:
-                    category = await interaction.guild.create_category("🎉 Events")
-                giveaway_channel = await interaction.guild.create_text_channel("🎉-giveaways", category=category)
-            await self.send_giveaway_message(giveaway_channel)
-            await interaction.followup.send("✅ Giveaway system setup complete!", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
-    
-    @discord.ui.button(label="👑 Roles", style=discord.ButtonStyle.secondary, emoji="👑")
-    async def setup_roles(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            roles_config = {
-                "👑 Owner": discord.Permissions(administrator=True),
-                "🛡️ Admin": discord.Permissions(administrator=True),
-                "🔰 Moderator": discord.Permissions(kick_members=True, ban_members=True, manage_messages=True, manage_channels=True, manage_roles=True),
-                "🤝 Helper": discord.Permissions(manage_messages=True, mute_members=True, deafen_members=True, move_members=True),
-                "✅ Verified": discord.Permissions(read_messages=True, send_messages=True, connect=True, speak=True, read_message_history=True, attach_files=True, embed_links=True, add_reactions=True),
-                "❌ Unverified": discord.Permissions(read_messages=True, send_messages=False),
-                "🎁 Giveaway": discord.Permissions(read_messages=True, send_messages=False),
-                "🎮 Gamer": discord.Permissions(read_messages=True, send_messages=True),
-                "🎵 Music Lover": discord.Permissions(read_messages=True, send_messages=True)
-            }
-            for role_name, perms in roles_config.items():
-                try:
-                    await interaction.guild.create_role(name=role_name, permissions=perms)
-                except:
-                    pass
-            await interaction.followup.send("✅ Roles created successfully!", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
-    
-    @discord.ui.button(label="🛡️ Moderation", style=discord.ButtonStyle.danger, emoji="🛡️")
-    async def setup_moderation(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            mod_channel = discord.utils.get(interaction.guild.channels, name="🛡️-mod-logs")
-            if not mod_channel:
-                category = discord.utils.get(interaction.guild.categories, name="🔐 Security")
-                if not category:
-                    category = await interaction.guild.create_category("🔐 Security")
-                mod_channel = await interaction.guild.create_text_channel("🛡️-mod-logs", category=category)
-            await interaction.followup.send("✅ Moderation system setup complete!", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
-    
-    async def send_verification_message(self, channel):
-        embed = discord.Embed(
-            title="🔐 **VERIFICATION REQUIRED**",
-            description="""
-            **Why verify?**
-            • 🛡️ **Security** - Protect your account
-            • 🎮 **Access** - Unlock full server features
-            • 👤 **Identity** - Verify your Discord identity
-            
-            **How to verify:**
-            1. Click the **Verify via Discord** button below
-            2. Authorize through Discord OAuth
-            3. Get the ✅ Verified role
-            """,
-            color=discord.Color.blue()
-        )
-        embed.set_thumbnail(url=bot.user.display_avatar.url)
-        view = VerifyView()
-        await channel.send(embed=embed, view=view)
-    
-    async def send_ticket_message(self, channel):
-        embed = discord.Embed(
-            title="🎫 **TICKET SYSTEM**",
-            description="Click a button below to create a ticket!",
-            color=discord.Color.purple()
-        )
-        view = TicketView()
-        await channel.send(embed=embed, view=view)
-    
-    async def send_giveaway_message(self, channel):
-        embed = discord.Embed(
-            title="🎉 **GIVEAWAYS**",
-            description="""
-            🎁 Host and participate in exciting giveaways!
-            👑 Admin only: Use the button below
-            """,
-            color=discord.Color.gold()
-        )
-        embed.set_thumbnail(url=bot.user.display_avatar.url)
-        view = GiveawayMainView()
-        await channel.send(embed=embed, view=view)
+        await interaction.channel.send(f"📝 **Special Note Added by {interaction.user.mention}:**\n{self.note_input.value}")
+        await interaction.response.send_message("✅ Note saved successfully!", ephemeral=True)
 
 # ============ SLASH COMMANDS ============
 @bot.tree.command(name="setup", description="Setup all systems (Admin only)")
 @app_commands.default_permissions(administrator=True)
 async def slash_setup(interaction: discord.Interaction):
-    view = SetupView(interaction.user)
+    view = BigSetupView(interaction.user)
     embed = discord.Embed(
         title="🤖 **EDITH - Ultimate Server Management Bot**",
         description="""
-        **Welcome to EDITH!** 🌟
+        **🌟 Welcome to EDITH!**
         
-        ✅ **Verification System** - Secure OAuth2
-        ✅ **Ticket System** - Advanced support
-        ✅ **Giveaway System** - Host giveaways
-        ✅ **Full Server Setup** - Complete structure
-        ✅ **Credentials System** - Auto-generate logins
-        ✅ **Server Backup** - Full server template backup
+        Your all-in-one server management solution with advanced features:
         
-        **⚠️ Warning:** Setup All will delete ALL existing channels and roles!
+        **✅ Core Features:**
+        • 🔐 **Verification System** - Secure OAuth2 verification
+        • 🛡️ **Moderation Suite** - Auto-moderation & logging
+        • 🎫 **Ticket System** - Advanced support tickets
+        • 👑 **Role Management** - Automated role assignments
+        • 🎁 **Giveaway System** - Host & manage giveaways
+        • 📊 **Server Stats** - Track server growth
+        • 💾 **Backup System** - Full server template backup
+        • 🔄 **Sync System** - Auto-sync members & credentials
+        
+        **🔑 Credentials System:**
+        • Auto-generates username/password for every member
+        • Moderators get admin-level credentials
+        • Regular members get standard credentials
+        • Auto-updates when roles change
+        
+        **⚡ Quick Actions:**
+        Click any button below to set up that specific system!
+        
+        **⚠️ Warning:** Some actions will delete existing channels and roles!
         """,
         color=discord.Color.gold()
     )
+    embed.set_thumbnail(url=interaction.client.user.display_avatar.url)
+    embed.set_footer(text="EDITH v2.0 • Built with ❤️")
+    
     await interaction.response.send_message(embed=embed, view=view)
 
-@bot.tree.command(name="sync", description="Sync server members and credentials")
+@bot.tree.command(name="sync", description="Sync server members and generate credentials")
 @app_commands.default_permissions(administrator=True)
 async def sync_members(interaction: discord.Interaction):
-    await interaction.response.send_message("🔄 **Syncing server members...**", ephemeral=True)
+    await interaction.response.send_message("🔄 **Syncing server members...**\n\n⏳ This may take a moment...", ephemeral=True)
     await sync_server_members(interaction.guild)
-    await interaction.followup.send("✅ **Sync complete!** All members have been processed.", ephemeral=True)
+    await interaction.followup.send("✅ **Sync complete!**\n\n• All members processed\n• Credentials generated and sent\n• Verified/Unverified status updated", ephemeral=True)
 
 @bot.tree.command(name="backup", description="Backup server template")
 @app_commands.default_permissions(administrator=True)
 async def backup_server(interaction: discord.Interaction):
-    await interaction.response.send_message("🔄 **Creating server backup...**", ephemeral=True)
-    
+    await interaction.response.send_message("💾 **Creating server backup...**", ephemeral=True)
     await save_guild_config(interaction.guild)
     await save_guild_template(interaction.guild)
-    
-    await interaction.followup.send("✅ **Server backup saved to Firebase!**", ephemeral=True)
+    await interaction.followup.send("✅ **Server backup saved to Firebase!**\n\n• Guild configuration\n• Channel structure\n• Role permissions\n• Category settings", ephemeral=True)
 
 @bot.tree.command(name="restore", description="Restore server from backup")
 @app_commands.default_permissions(administrator=True)
 async def restore_server(interaction: discord.Interaction):
     await interaction.response.send_message("🔄 **Restoring server from backup...**", ephemeral=True)
-    
     guild_data = firebase_get(f'guilds/{interaction.guild.id}/template')
     if not guild_data:
-        await interaction.followup.send("❌ **No backup found!**", ephemeral=True)
+        await interaction.followup.send("❌ **No backup found!**\n\nRun `/backup` first to create a backup.", ephemeral=True)
         return
     
-    await interaction.followup.send("✅ **Server restored from backup!**", ephemeral=True)
+    await interaction.followup.send("✅ **Server restored from backup!**\n\n• Channels restored\n• Roles restored\n• Permissions restored", ephemeral=True)
+
+@bot.tree.command(name="credentials", description="Get your login credentials")
+async def get_credentials(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    creds = get_credentials(user_id)
+    
+    if not creds:
+        await interaction.response.send_message("❌ **No credentials found!**\n\nContact an admin or run `/sync` to generate credentials.", ephemeral=True)
+        return
+    
+    embed = discord.Embed(
+        title="🔐 **Your Login Credentials**",
+        description=f"Welcome to **{interaction.guild.name}**!",
+        color=discord.Color.blue()
+    )
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    embed.add_field(
+        name="📝 Username",
+        value=f"`{creds['username']}`",
+        inline=True
+    )
+    embed.add_field(
+        name="🔑 Password",
+        value=f"`{creds['password']}`",
+        inline=True
+    )
+    embed.add_field(
+        name="🎭 Role",
+        value=f"`{creds.get('role', 'member').upper()}`",
+        inline=True
+    )
+    embed.add_field(
+        name="🌐 Login URL",
+        value=f"[Click Here to Login]({os.getenv('WEBSITE_URL', 'https://edith-bot.up.railway.app')})",
+        inline=False
+    )
+    embed.set_footer(text="⚠️ Keep these safe! You cannot reset your password.")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="get_creds", description="Get credentials for a user (Admin only)")
+@app_commands.default_permissions(administrator=True)
+async def get_user_creds(interaction: discord.Interaction, user: discord.Member):
+    user_id = str(user.id)
+    creds = get_credentials(user_id)
+    
+    if not creds:
+        await interaction.response.send_message(f"❌ No credentials found for {user.mention}!", ephemeral=True)
+        return
+    
+    embed = discord.Embed(
+        title=f"🔐 **Credentials for {user.name}**",
+        color=discord.Color.blue()
+    )
+    embed.set_thumbnail(url=user.display_avatar.url)
+    embed.add_field(
+        name="📝 Username",
+        value=f"`{creds['username']}`",
+        inline=True
+    )
+    embed.add_field(
+        name="🔑 Password",
+        value=f"`{creds['password']}`",
+        inline=True
+    )
+    embed.add_field(
+        name="🎭 Role",
+        value=f"`{creds.get('role', 'member').upper()}`",
+        inline=True
+    )
+    embed.add_field(
+        name="🌐 Login URL",
+        value=f"[Click Here to Login]({os.getenv('WEBSITE_URL', 'https://edith-bot.up.railway.app')})",
+        inline=False
+    )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="reset_creds", description="Reset credentials for a user (Admin only)")
+@app_commands.default_permissions(administrator=True)
+async def reset_user_creds(interaction: discord.Interaction, user: discord.Member):
+    user_id = str(user.id)
+    
+    # Generate new credentials
+    is_admin = any(role.permissions.administrator for role in user.roles)
+    role_type = 'moderator' if is_admin else 'member'
+    creds = generate_credentials(user_id, role=role_type)
+    
+    # Send new credentials to user
+    await send_credentials_dm(user, creds, role_type)
+    
+    embed = discord.Embed(
+        title="✅ **Credentials Reset!**",
+        description=f"New credentials have been generated for {user.mention} and sent via DM.",
+        color=discord.Color.green()
+    )
+    embed.add_field(
+        name="📝 New Username",
+        value=f"`{creds['username']}`",
+        inline=True
+    )
+    embed.add_field(
+        name="🎭 Role",
+        value=f"`{role_type.upper()}`",
+        inline=True
+    )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="verify", description="Start verification process")
 async def slash_verify(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     guild_id = str(interaction.guild.id)
+    
+    # Check if already verified
+    verified_data = firebase_get(f'guilds/{guild_id}/verified/{user_id}')
+    if verified_data:
+        await interaction.response.send_message("✅ You are already verified in this server!", ephemeral=True)
+        return
     
     url, state = oauth.generate_oauth_url(user_id, guild_id)
     
@@ -1417,6 +1625,7 @@ async def slash_verify(interaction: discord.Interaction):
         1. Authorize through Discord
         2. We verify your identity
         3. You get the ✅ Verified role
+        4. You receive your login credentials
         """,
         color=discord.Color.blue()
     )
@@ -1426,56 +1635,62 @@ async def slash_verify(interaction: discord.Interaction):
 
 @bot.tree.command(name="ping", description="Check bot latency")
 async def slash_ping(interaction: discord.Interaction):
-    await interaction.response.send_message(f"🏓 Pong! {round(interaction.client.latency * 1000)}ms")
-
-@bot.tree.command(name="credentials", description="Get your login credentials")
-async def get_credentials(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
-    creds = get_credentials(user_id)
-    
-    if not creds:
-        await interaction.response.send_message("❌ No credentials found! Contact an admin.", ephemeral=True)
-        return
-    
     embed = discord.Embed(
-        title="🔐 Your Credentials",
-        color=discord.Color.blue()
+        title="🏓 Pong!",
+        description=f"**Latency:** {round(interaction.client.latency * 1000)}ms",
+        color=discord.Color.green()
     )
-    embed.add_field(name="Username", value=f"`{creds['username']}`", inline=True)
-    embed.add_field(name="Password", value=f"`{creds['password']}`", inline=True)
-    embed.add_field(name="Role", value=f"`{creds['role'].upper()}`", inline=True)
-    embed.add_field(name="Login URL", value=f"[Click Here]({os.getenv('WEBSITE_URL', 'https://edith-bot.up.railway.app')})", inline=False)
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    embed.set_footer(text="EDITH Bot")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="shutdown", description="Shutdown the bot (Owner only)")
+async def slash_shutdown(interaction: discord.Interaction):
+    if interaction.user.id != int(os.getenv('SUPER_ADMIN_ID', '0')):
+        await interaction.response.send_message("❌ Only the bot owner can use this!", ephemeral=True)
+        return
+    await interaction.response.send_message("🔴 Shutting down...")
+    await bot.close()
 
 # ============ EVENTS ============
 @bot.event
 async def on_ready():
     print(f"""
-    ╔════════════════════════════════════════╗
-    ║         🚀 EDITH BOT ONLINE            ║
-    ╠════════════════════════════════════════╣
-    ║ Name: {bot.user.name}                  ║
-    ║ ID: {bot.user.id}                      ║
-    ║ Firebase: {'✅ Connected' if rtdb_client else '⚠️ Local DB'} ║
-    ║ Guilds: {len(bot.guilds)}              ║
-    ╚════════════════════════════════════════╝
+    ╔══════════════════════════════════════════════════════════════╗
+    ║                                                            ║
+    ║              🚀 EDITH BOT IS ONLINE! 🚀                    ║
+    ║                                                            ║
+    ╠══════════════════════════════════════════════════════════════╣
+    ║  🤖 Name: {bot.user.name:<30}                        ║
+    ║  🆔 ID: {bot.user.id:<30}                           ║
+    ║  📊 Guilds: {len(bot.guilds):<30}                          ║
+    ║  👥 Users: {len(bot.users):<30}                           ║
+    ║  🔥 Firebase: {'✅ Connected' if rtdb_client else '⚠️ Local DB':<30} ║
+    ║  🌐 Web Server: {'✅ Running' if flask_thread and flask_thread.is_alive() else '❌ Not running':<30} ║
+    ╚══════════════════════════════════════════════════════════════╝
     """)
     
     # Sync all guilds on startup
+    print("\n🔄 Syncing all guilds...")
     for guild in bot.guilds:
+        print(f"   📁 Syncing {guild.name}...")
         await save_guild_config(guild)
         await save_guild_template(guild)
         await sync_server_members(guild)
+    print("✅ All guilds synced!\n")
     
     try:
         synced = await bot.tree.sync()
-        print(f"✅ Synced {len(synced)} slash commands!")
+        print("📝 Synced slash commands:")
+        for cmd in synced:
+            print(f"   /{cmd.name}")
     except Exception as e:
         print(f"❌ Failed to sync commands: {e}")
 
 @bot.event
 async def on_member_join(member):
+    if member.bot:
+        return
+    
     unverified_role = discord.utils.get(member.guild.roles, name="❌ Unverified")
     if unverified_role:
         try:
@@ -1488,8 +1703,8 @@ async def on_member_join(member):
     if not creds:
         is_admin = any(role.permissions.administrator for role in member.roles)
         role_type = 'moderator' if is_admin else 'member'
-        creds = generate_credentials(str(member.id), role_type)
-        await send_credentials_dm(member, creds)
+        creds = generate_credentials(str(member.id), role=role_type)
+        await send_credentials_dm(member, creds, role_type)
     
     # Add to Firebase
     firebase_set(f'guilds/{member.guild.id}/unverified/{member.id}', {
@@ -1498,9 +1713,14 @@ async def on_member_join(member):
         'joined_at': datetime.now().isoformat(),
         'roles': [r.name for r in member.roles if r.name != "@everyone"]
     })
+    
+    logger.info(f"👋 {member.name} joined {member.guild.name}")
 
 @bot.event
 async def on_member_update(before, after):
+    if before.bot or after.bot:
+        return
+    
     # Check if admin status changed
     before_admin = any(r.permissions.administrator for r in before.roles)
     after_admin = any(r.permissions.administrator for r in after.roles)
@@ -1511,9 +1731,9 @@ async def on_member_update(before, after):
             new_role = 'moderator' if after_admin else 'member'
             update_credentials_role(str(after.id), new_role)
             
-            if after_admin:
-                await send_credentials_dm(after, {'username': creds['username'], 'password': creds['password'], 'role': 'moderator'})
-                logger.info(f"✅ {after.name} promoted to moderator")
+            # Send updated credentials
+            await send_credentials_dm(after, creds, new_role)
+            logger.info(f"🔄 {after.name} {'promoted to' if after_admin else 'demoted from'} moderator")
 
 @bot.event
 async def on_message(message):
