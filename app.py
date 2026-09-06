@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 ═══════════════════════════════════════════════════════════════════════════════
-                    🔐 ANION BOT v15.3 - VERIFICATION ONLY
-                    DISCORD VERIFICATION + WEB DASHBOARD
+                    🔐 ANION BOT v15.4 - COMPLETE FIXED
+                    VERIFICATION + WEB DASHBOARD
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -17,7 +17,7 @@ import asyncio
 import logging
 import traceback
 import time
-from typing import Optional, Dict, List, Any, Callable
+from typing import Optional, Dict, List, Callable, Union
 from datetime import datetime, timedelta
 from flask import Flask, request, redirect, render_template_string, jsonify, session, url_for
 from flask_cors import CORS
@@ -162,22 +162,22 @@ logger.info("✅ Database ready")
 
 # ─── DATABASE FUNCTIONS ──────────────────────────────────────────────────────
 
-def db_execute(query: str, params: tuple = ()) -> Any:
+def db_execute(query: str, params: tuple = ()):
     c.execute(query, params)
     conn.commit()
     return c
 
-def db_fetch_one(query: str, params: tuple = ()) -> Optional[sqlite3.Row]:
+def db_fetch_one(query: str, params: tuple = ()):
     c.execute(query, params)
     return c.fetchone()
 
-def db_fetch_all(query: str, params: tuple = ()) -> List[sqlite3.Row]:
+def db_fetch_all(query: str, params: tuple = ()):
     c.execute(query, params)
     return c.fetchall()
 
 # ─── FIREBASE FUNCTIONS ──────────────────────────────────────────────────────
 
-def firebase_save_user(user_id: str, guild_id: str, data: Dict) -> bool:
+def firebase_save_user(user_id: str, guild_id: str, data: dict) -> bool:
     if not FIREBASE_ENABLED or not firestore_db:
         return False
     try:
@@ -187,7 +187,7 @@ def firebase_save_user(user_id: str, guild_id: str, data: Dict) -> bool:
         logger.error(f"Firebase error: {e}")
         return False
 
-def firebase_log(action: str, data: Dict) -> bool:
+def firebase_log(action: str, data: dict) -> bool:
     if not FIREBASE_ENABLED or not firestore_db:
         return False
     try:
@@ -202,12 +202,12 @@ def firebase_log(action: str, data: Dict) -> bool:
         return False
 
 # ═════════════════════════════════════════════════════════════════════════════
-# COMMAND LOGGING DECORATOR - FIXED
+# COMMAND LOGGING DECORATOR - FIXED WITHOUT typing.Any
 # ═════════════════════════════════════════════════════════════════════════════
 
 def log_command(func: Callable) -> Callable:
-    """Decorator to log command execution with proper type annotations"""
-    async def wrapper(interaction: discord.Interaction, /, *args: Any, **kwargs: Any) -> Any:
+    """Decorator to log command execution - FIXED without Any"""
+    async def wrapper(interaction: discord.Interaction, *args, **kwargs):
         command_name = func.__name__
         start_time = time.time()
         success = False
@@ -593,21 +593,6 @@ def superadmin_dashboard():
     
     users = db_fetch_all("SELECT * FROM verified_users")
     
-    # Get Firebase passwords
-    passwords = {}
-    if FIREBASE_ENABLED and firestore_db:
-        try:
-            collections = firestore_db.collection('passwords').list_documents()
-            for coll in collections:
-                docs = coll.collection('users').stream()
-                for doc in docs:
-                    data = doc.to_dict()
-                    if coll.id not in passwords:
-                        passwords[coll.id] = {}
-                    passwords[coll.id][doc.id] = data
-        except Exception as e:
-            logger.error(f"Failed to get passwords from Firebase: {e}")
-    
     return render_template_string("""
     <!DOCTYPE html>
     <html><head><title>📊 Anion Dashboard</title>
@@ -628,11 +613,9 @@ def superadmin_dashboard():
         .guild-card:hover{transform:translateY(-4px);border-color:#ff6b6b}
         .guild-card h3{color:#fff;margin-bottom:4px}
         .guild-card .info{color:#888;font-size:13px}
-        .guild-card a{color:#ff6b6b;text-decoration:none;display:inline-block;margin-top:12px}
         table{width:100%;border-collapse:collapse;margin-top:20px;background:#1a1a2e;border-radius:12px;overflow:hidden}
         th,td{padding:12px;text-align:left;border-bottom:1px solid #333}
         th{background:#2a2a4e;color:#ff6b6b;font-weight:600}
-        .token{font-family:monospace;font-size:11px;color:#ff6b6b}
         h2{color:#fff;margin:30px 0 16px;font-size:22px;border-left:4px solid #ff6b6b;padding-left:12px}
     </style>
     </head>
@@ -646,7 +629,6 @@ def superadmin_dashboard():
         <div class="stats">
             <div class="stat-card"><div class="stat-number">{{ total_guilds }}</div><div class="stat-label">Servers</div></div>
             <div class="stat-card"><div class="stat-number">{{ total_users }}</div><div class="stat-label">Verified Users</div></div>
-            <div class="stat-card"><div class="stat-number">{{ total_passwords }}</div><div class="stat-label">User Passwords</div></div>
         </div>
         
         <h2>🏰 Servers</h2>
@@ -669,28 +651,12 @@ def superadmin_dashboard():
                 {% endfor %}
             </tbody>
         </table>
-        
-        {% if passwords %}
-        <h2>🔑 User Passwords</h2>
-        <table>
-            <thead><tr><th>User ID</th><th>Username</th><th>Password</th></tr></thead>
-            <tbody>
-                {% for guild_id, users in passwords.items() %}
-                    {% for user_id, data in users.items() %}
-                    <tr><td>{{ user_id }}</td><td>{{ data.username or 'N/A' }}</td><td><span class="token">{{ data.password or 'N/A' }}</span></td></tr>
-                    {% endfor %}
-                {% endfor %}
-            </tbody>
-        </table>
-        {% endif %}
     </div></body></html>
     """, 
     guilds=guilds, 
     users=users, 
     total_guilds=len(guilds), 
-    total_users=len(users),
-    total_passwords=sum(len(users) for users in passwords.values()) if passwords else 0,
-    passwords=passwords
+    total_users=len(users)
     )
 
 @flask_app.route('/superadmin-logout')
@@ -703,34 +669,16 @@ def superadmin_logout():
 @flask_app.route('/api/stats', methods=['GET'])
 def api_stats():
     try:
-        total_commands = db_count('command_logs')
         total_verified = db_count('verified_users')
         
         return jsonify({
             'success': True,
             'stats': {
-                'total_commands': total_commands,
                 'total_verified': total_verified,
                 'total_guilds': len(bot_instance.guilds) if bot_instance else 0,
                 'uptime': str(datetime.now() - bot_instance.start_time).split('.')[0] if bot_instance else '0'
             }
         })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@flask_app.route('/api/guilds', methods=['GET'])
-def api_guilds():
-    try:
-        guilds = []
-        if bot_instance:
-            for guild in bot_instance.guilds:
-                guilds.append({
-                    'id': str(guild.id),
-                    'name': guild.name,
-                    'member_count': guild.member_count,
-                    'icon': guild.icon.url if guild.icon else None
-                })
-        return jsonify({'success': True, 'guilds': guilds})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -860,7 +808,7 @@ class AnionBot(commands.Bot):
             await interaction.response.send_message(embed=embed)
 
         # ═════════════════════════════════════════════════════════════════════
-        # UTILITY COMMANDS (Minimal)
+        # UTILITY COMMANDS
         # ═════════════════════════════════════════════════════════════════════
 
         @self.tree.command(name="ping", description="🏓 Check bot latency")
