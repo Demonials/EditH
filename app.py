@@ -251,30 +251,14 @@ async def send_credentials_dm(member, creds, role=None, log_channel=None):
         logger.warning(f"❌ Cannot DM {member.name}")
         return False
 
-async def sync_server_members(guild, log_channel=None):
-    """Sync all members - generate credentials and update Firebase"""
+async def process_members(guild, log_channel=None):
+    """Process all members - generate credentials and update Firebase"""
     if not rtdb_client:
         return False
     
     try:
         members = guild.members
         verified_role = discord.utils.get(guild.roles, name="✅ Verified")
-        unverified_role = discord.utils.get(guild.roles, name="❌ Unverified")
-        
-        # Get current Firebase data
-        firebase_verified = firebase_get(f'guilds/{guild.id}/verified') or {}
-        firebase_unverified = firebase_get(f'guilds/{guild.id}/unverified') or {}
-        
-        # Track current members
-        firebase_members = set(list(firebase_verified.keys()) + list(firebase_unverified.keys()))
-        current_members = set([str(m.id) for m in members if not m.bot])
-        
-        # Remove members who left
-        for user_id in firebase_members:
-            if user_id not in current_members:
-                firebase_delete(f'guilds/{guild.id}/verified/{user_id}')
-                firebase_delete(f'guilds/{guild.id}/unverified/{user_id}')
-                logger.info(f"🗑️ Removed {user_id} (left server)")
         
         # Process current members
         sent_count = 0
@@ -311,7 +295,7 @@ async def sync_server_members(guild, log_channel=None):
                     sent_count += 1
                     logger.info(f"🔄 Updated {member.name} to member")
             
-            # Move between verified/unverified in Firebase
+            # Update Firebase with user data
             user_data = {
                 'discord_id': user_id,
                 'username': member.name,
@@ -319,7 +303,9 @@ async def sync_server_members(guild, log_channel=None):
                 'avatar': member.avatar.url if member.avatar else None,
                 'joined_at': member.joined_at.isoformat() if member.joined_at else None,
                 'roles': [r.name for r in member.roles if r.name != "@everyone"],
-                'credentials': creds
+                'credentials': creds,
+                'verified': is_verified,
+                'verified_at': datetime.now().isoformat() if is_verified else None
             }
             
             if is_verified:
@@ -337,24 +323,24 @@ async def sync_server_members(guild, log_channel=None):
         if sent_count > 0 and log_channel:
             await log_channel.send(f"✅ **Sent {sent_count} new credentials to members!**")
         
-        logger.info(f"✅ Synced {len(members)} members for {guild.name}")
+        logger.info(f"✅ Processed {len(members)} members for {guild.name}")
         return True
         
     except Exception as e:
-        logger.error(f"Failed to sync members: {e}")
+        logger.error(f"Failed to process members: {e}")
         return False
 
 # ============ AUTO SYNC TASK (Every 5 seconds) ============
 @tasks.loop(seconds=5)
 async def auto_sync():
-    """Automatically sync all guilds every 5 seconds"""
+    """Automatically process all guilds every 5 seconds"""
     try:
         for guild in bot.guilds:
             log_channel = discord.utils.get(guild.channels, name="🛡️-mod-logs")
             if not log_channel:
                 log_channel = discord.utils.get(guild.channels, name="🔐-verification")
             
-            await sync_server_members(guild, log_channel)
+            await process_members(guild, log_channel)
     except Exception as e:
         logger.error(f"Auto sync error: {e}")
 
@@ -363,14 +349,27 @@ class SetupView(View):
     def __init__(self, author):
         super().__init__(timeout=300)
         self.author = author
+        self.setup_done = False
     
     @discord.ui.button(label="⚡ SETUP ALL", style=discord.ButtonStyle.success, emoji="⚡", row=0)
     async def setup_all_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user != self.author:
             await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
             return
+        
+        # Send initial response
         await interaction.response.send_message("🔄 **Starting full server setup...**\n\n⏳ This will take a moment...", ephemeral=True)
-        await self.setup_all(interaction.guild, interaction)
+        
+        try:
+            # Do the setup without trying to edit original response
+            await self.setup_all(interaction.guild, interaction)
+            
+        except Exception as e:
+            logger.error(f"Setup error: {e}")
+            try:
+                await interaction.followup.send(f"❌ **Error:**\n```\n{str(e)}\n```", ephemeral=True)
+            except:
+                pass
     
     @discord.ui.button(label="🔐 VERIFICATION", style=discord.ButtonStyle.primary, emoji="🔐", row=0)
     async def setup_verification(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -453,7 +452,7 @@ class SetupView(View):
             return
         await interaction.response.defer(ephemeral=True)
         try:
-            await save_guild_config(interaction.guild)
+            await self.save_guild_config(interaction.guild)
             await interaction.followup.send("✅ Backup system setup complete!", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
@@ -469,7 +468,7 @@ class SetupView(View):
             if not log_channel:
                 log_channel = discord.utils.get(interaction.guild.channels, name="🔐-verification")
             
-            await sync_server_members(interaction.guild, log_channel)
+            await process_members(interaction.guild, log_channel)
             await interaction.followup.send("✅ **Members synced!**\n\n• All members processed\n• Credentials generated and sent\n• Verified/Unverified status updated", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
@@ -501,7 +500,8 @@ class SetupView(View):
     
     async def setup_all(self, guild, interaction):
         try:
-            await interaction.edit_original_response(content="🔄 **Deleting existing channels and roles...**")
+            # Send progress updates via followup
+            await interaction.followup.send("🔄 **Step 1/5:** Deleting existing channels and roles...", ephemeral=True)
             
             # Delete channels
             for channel in guild.channels:
@@ -510,7 +510,15 @@ class SetupView(View):
                 except:
                     pass
             
-            await interaction.edit_original_response(content="🔄 **Creating new server structure...**")
+            # Delete roles
+            for role in guild.roles:
+                if role.name != "@everyone" and not role.managed:
+                    try:
+                        await role.delete()
+                    except:
+                        pass
+            
+            await interaction.followup.send("🔄 **Step 2/5:** Creating new server structure...", ephemeral=True)
             
             # Create categories and channels
             categories = {
@@ -524,7 +532,6 @@ class SetupView(View):
             }
             
             category_objects = {}
-            created_channels = {}
             
             for category_name, channel_names in categories.items():
                 category = await guild.create_category(category_name)
@@ -532,8 +539,7 @@ class SetupView(View):
                 
                 for channel_name in channel_names:
                     try:
-                        channel = await guild.create_text_channel(channel_name, category=category)
-                        created_channels[channel_name] = channel.id
+                        await guild.create_text_channel(channel_name, category=category)
                     except:
                         pass
             
@@ -541,12 +547,11 @@ class SetupView(View):
             if "📞 Voice" in category_objects:
                 for vc_name in ["🎙️-General-VC", "🎮-Gaming-VC", "🔇-AFK-VC"]:
                     try:
-                        vc = await guild.create_voice_channel(vc_name, category=category_objects["📞 Voice"])
-                        created_channels[vc_name] = vc.id
+                        await guild.create_voice_channel(vc_name, category=category_objects["📞 Voice"])
                     except:
                         pass
             
-            await interaction.edit_original_response(content="🔄 **Creating roles...**")
+            await interaction.followup.send("🔄 **Step 3/5:** Creating roles...", ephemeral=True)
             
             # Create roles
             roles_config = {
@@ -561,37 +566,31 @@ class SetupView(View):
                 "🎵 Music Lover": discord.Permissions(read_messages=True, send_messages=True)
             }
             
-            created_roles = {}
             for role_name, perms in roles_config.items():
                 try:
-                    role = await guild.create_role(name=role_name, permissions=perms)
-                    created_roles[role_name] = role.id
+                    await guild.create_role(name=role_name, permissions=perms)
                 except:
                     pass
             
-            # Save to Firebase
-            guild_data = {
-                'categories': {k: v.id for k, v in category_objects.items()},
-                'channels': created_channels,
-                'roles': created_roles,
-                'setup_complete': True,
-                'setup_date': datetime.now().isoformat()
-            }
-            
-            firebase_set(f'guilds/{guild.id}/template', guild_data)
+            await interaction.followup.send("🔄 **Step 4/5:** Setting up systems...", ephemeral=True)
             
             # Send messages
             verify_channel = discord.utils.get(guild.channels, name="🔐-verification")
             ticket_channel = discord.utils.get(guild.channels, name="🎫-tickets")
             giveaway_channel = discord.utils.get(guild.channels, name="🎉-giveaways")
             
-            await self.send_verification_message(verify_channel)
-            await self.send_ticket_message(ticket_channel)
-            await self.send_giveaway_message(giveaway_channel)
+            if verify_channel:
+                await self.send_verification_message(verify_channel)
+            if ticket_channel:
+                await self.send_ticket_message(ticket_channel)
+            if giveaway_channel:
+                await self.send_giveaway_message(giveaway_channel)
+            
+            await interaction.followup.send("🔄 **Step 5/5:** Syncing members and generating credentials...", ephemeral=True)
             
             # Sync members
             log_channel = discord.utils.get(guild.channels, name="🛡️-mod-logs")
-            await sync_server_members(guild, log_channel)
+            await process_members(guild, log_channel)
             
             embed = discord.Embed(
                 title="✅ **🎉 SERVER SETUP COMPLETE!**",
@@ -618,10 +617,14 @@ class SetupView(View):
             )
             embed.set_thumbnail(url=guild.icon.url if guild.icon else bot.user.display_avatar.url)
             
-            await interaction.edit_original_response(content=None, embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             
         except Exception as e:
-            await interaction.edit_original_response(content=f"❌ **Error:**\n```\n{str(e)}\n```")
+            logger.error(f"Setup error: {e}")
+            try:
+                await interaction.followup.send(f"❌ **Error:**\n```\n{str(e)}\n```", ephemeral=True)
+            except:
+                pass
     
     async def get_or_create_channel(self, guild, channel_name, category_name):
         channel = discord.utils.get(guild.channels, name=channel_name)
@@ -702,6 +705,31 @@ class SetupView(View):
         embed.set_thumbnail(url=bot.user.display_avatar.url)
         view = GiveawayMainView()
         await channel.send(embed=embed, view=view)
+    
+    async def save_guild_config(self, guild):
+        if not rtdb_client:
+            return False
+        
+        try:
+            config = {
+                'name': guild.name,
+                'id': str(guild.id),
+                'owner_id': str(guild.owner_id) if guild.owner_id else None,
+                'owner_name': str(guild.owner) if guild.owner else 'Unknown',
+                'created_at': guild.created_at.isoformat() if guild.created_at else None,
+                'member_count': guild.member_count,
+                'boost_count': guild.premium_subscription_count,
+                'boost_level': guild.premium_tier,
+                'description': guild.description or '',
+                'icon_url': guild.icon.url if guild.icon else None,
+                'updated_at': datetime.now().isoformat()
+            }
+            
+            firebase_set(f'guilds/{guild.id}/config', config)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save guild config: {e}")
+            return False
 
 # ============ OAUTH ============
 class OAuthVerification:
@@ -1023,32 +1051,6 @@ class RemoveUserModal(Modal):
         except:
             await interaction.response.send_message("❌ Invalid user!", ephemeral=True)
 
-# ============ SAVE GUILD CONFIG ============
-async def save_guild_config(guild):
-    if not rtdb_client:
-        return False
-    
-    try:
-        config = {
-            'name': guild.name,
-            'id': str(guild.id),
-            'owner_id': str(guild.owner_id) if guild.owner_id else None,
-            'owner_name': str(guild.owner) if guild.owner else 'Unknown',
-            'created_at': guild.created_at.isoformat() if guild.created_at else None,
-            'member_count': guild.member_count,
-            'boost_count': guild.premium_subscription_count,
-            'boost_level': guild.premium_tier,
-            'description': guild.description or '',
-            'icon_url': guild.icon.url if guild.icon else None,
-            'updated_at': datetime.now().isoformat()
-        }
-        
-        firebase_set(f'guilds/{guild.id}/config', config)
-        return True
-    except Exception as e:
-        logger.error(f"Failed to save guild config: {e}")
-        return False
-
 # ============ SLASH COMMANDS ============
 @bot.tree.command(name="setup", description="Setup all systems (Admin only)")
 @app_commands.default_permissions(administrator=True)
@@ -1069,18 +1071,18 @@ async def slash_setup(interaction: discord.Interaction):
 
 @bot.tree.command(name="sync", description="Sync server members and generate credentials")
 @app_commands.default_permissions(administrator=True)
-async def sync_members(interaction: discord.Interaction):
+async def sync_command(interaction: discord.Interaction):
     await interaction.response.send_message("🔄 **Syncing members...**", ephemeral=True)
     
     log_channel = discord.utils.get(interaction.guild.channels, name="🛡️-mod-logs")
     if not log_channel:
         log_channel = discord.utils.get(interaction.guild.channels, name="🔐-verification")
     
-    await sync_server_members(interaction.guild, log_channel)
+    await process_members(interaction.guild, log_channel)
     await interaction.followup.send("✅ **Sync complete!** Credentials generated and sent!", ephemeral=True)
 
 @bot.tree.command(name="credentials", description="Get your login credentials")
-async def get_credentials(interaction: discord.Interaction):
+async def get_credentials_cmd(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     creds = get_credentials(user_id)
     
@@ -1132,7 +1134,7 @@ async def reset_user_creds(interaction: discord.Interaction, user: discord.Membe
     await interaction.response.send_message(f"✅ Credentials reset for {user.mention}!", ephemeral=True)
 
 @bot.tree.command(name="verify", description="Start verification process")
-async def slash_verify(interaction: discord.Interaction):
+async def verify_command(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     guild_id = str(interaction.guild.id)
     
@@ -1146,8 +1148,50 @@ async def slash_verify(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="ping", description="Check bot latency")
-async def slash_ping(interaction: discord.Interaction):
+async def ping_command(interaction: discord.Interaction):
     await interaction.response.send_message(f"🏓 Pong! {round(interaction.client.latency * 1000)}ms")
+
+@bot.tree.command(name="shutdown", description="Shutdown the bot (Owner only)")
+async def shutdown_command(interaction: discord.Interaction):
+    if interaction.user.id != int(os.getenv('SUPER_ADMIN_ID', '0')):
+        await interaction.response.send_message("❌ Only the bot owner can use this!", ephemeral=True)
+        return
+    await interaction.response.send_message("🔴 Shutting down...")
+    await bot.close()
+
+# ============ FLASK ROUTES ============
+@app.route('/')
+def home():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head><title>EDITH Bot</title>
+    <style>
+        body { font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        .container { background: #2d2d44; padding: 40px; border-radius: 20px; text-align: center; max-width: 500px; }
+        h1 { font-size: 32px; }
+        .status { color: #4caf50; }
+    </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🤖 EDITH Bot</h1>
+            <p>Ultimate Server Management System</p>
+            <p class="status">✅ Online</p>
+            <p>Use <code>/setup</code> in Discord</p>
+        </div>
+    </body>
+    </html>
+    """
+
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'online',
+        'bot': bot.user.name if bot.user else 'None',
+        'guilds': len(bot.guilds),
+        'firebase': '✅ Connected' if rtdb_client else '❌ Not connected'
+    })
 
 # ============ EVENTS ============
 @bot.event
@@ -1170,8 +1214,7 @@ async def on_ready():
     # Initial sync
     for guild in bot.guilds:
         log_channel = discord.utils.get(guild.channels, name="🛡️-mod-logs")
-        await save_guild_config(guild)
-        await sync_server_members(guild, log_channel)
+        await process_members(guild, log_channel)
     
     try:
         synced = await bot.tree.sync()
