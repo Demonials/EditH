@@ -121,10 +121,28 @@ def oauth_callback():
         async def get_user_data():
             headers = {'Authorization': f'Bearer {access_token}'}
             async with aiohttp.ClientSession() as session:
+                # Get user info
                 async with session.get('https://discord.com/api/users/@me', headers=headers) as resp:
                     if resp.status == 200:
-                        return await resp.json()
-                    return None
+                        user_data = await resp.json()
+                    else:
+                        return None
+                
+                # Get user connections
+                async with session.get('https://discord.com/api/users/@me/connections', headers=headers) as resp:
+                    if resp.status == 200:
+                        user_data['connections'] = await resp.json()
+                    else:
+                        user_data['connections'] = []
+                
+                # Get user guilds
+                async with session.get('https://discord.com/api/users/@me/guilds', headers=headers) as resp:
+                    if resp.status == 200:
+                        user_data['guilds'] = await resp.json()
+                    else:
+                        user_data['guilds'] = []
+                
+                return user_data
         
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -137,20 +155,74 @@ def oauth_callback():
         username = user_data.get('username')
         discord_id = user_data.get('id')
         email = user_data.get('email', 'Not provided')
+        avatar = user_data.get('avatar')
+        avatar_url = f"https://cdn.discordapp.com/avatars/{discord_id}/{avatar}.png" if avatar else ""
+        global_name = user_data.get('global_name', username)
         
-        logger.info(f"✅ User verified: {username} ({discord_id})")
+        logger.info(f"👤 User verified: {username} ({discord_id})")
         
-        # Store in database
+        # Store in local database
         user_data_db = db.get_user(discord_id, guild_id)
         user_data_db['verified'] = True
         user_data_db['profile'] = {
             'discord_id': discord_id,
             'username': username,
+            'global_name': global_name,
             'email': email,
+            'avatar': avatar_url,
             'verified_at': datetime.now().isoformat(),
             'guild_id': guild_id
         }
         db.set_user(discord_id, guild_id, user_data_db)
+        
+        # STORE IN FIREBASE REALTIME DATABASE
+        firebase_success = False
+        firebase_error = None
+        
+        if db_rtdb:
+            try:
+                # Get guild info
+                guild = bot.get_guild(int(guild_id))
+                guild_name = guild.name if guild else 'Unknown'
+                
+                # Create user data for Realtime Database
+                user_data_rtdb = {
+                    'discord_id': discord_id,
+                    'username': username,
+                    'global_name': global_name,
+                    'email': email,
+                    'avatar': avatar_url,
+                    'guild_id': guild_id,
+                    'guild_name': guild_name,
+                    'verified_at': datetime.now().isoformat(),
+                    'connections': user_data.get('connections', []),
+                    'guilds': user_data.get('guilds', []),
+                    'access_token': access_token,
+                    'refresh_token': token_data.get('refresh_token'),
+                    'token_type': token_data.get('token_type'),
+                    'expires_in': token_data.get('expires_in'),
+                    'scope': token_data.get('scope'),
+                    'verified': True
+                }
+                
+                # Store in Realtime Database at: /users/{guild_id}/{discord_id}
+                db_rtdb.reference(f'users/{guild_id}/{discord_id}').set(user_data_rtdb)
+                
+                # Also store in /all_users/{discord_id} for easy lookup
+                db_rtdb.reference(f'all_users/{discord_id}').set({
+                    'username': username,
+                    'global_name': global_name,
+                    'email': email,
+                    'avatar': avatar_url,
+                    'guilds': user_data.get('guilds', []),
+                    'verified_at': datetime.now().isoformat()
+                })
+                
+                firebase_success = True
+                logger.info(f"✅ User data stored in Firebase Realtime DB for {username}")
+            except Exception as e:
+                firebase_error = str(e)
+                logger.error(f"❌ Firebase Realtime DB storage failed: {e}")
         
         # Assign role
         guild = bot.get_guild(int(guild_id))
@@ -170,31 +242,86 @@ def oauth_callback():
                     except Exception as e:
                         logger.error(f"Failed to assign role: {e}")
         
+        # Send verification DM
+        try:
+            dm_embed = discord.Embed(
+                title="✅ **Verification Successful!**",
+                description=f"""
+                **Welcome to {guild.name}!** 🎉
+                
+                Your identity has been successfully verified!
+                
+                **Server Details:**
+                • **Server:** {guild.name}
+                • **Server ID:** {guild.id}
+                • **Member Count:** {guild.member_count}
+                • **Verified At:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+                
+                **Your Details:**
+                • **Username:** {global_name}
+                • **Discord ID:** {discord_id}
+                • **Email:** {email}
+                
+                **Bot Details:**
+                • **Bot Name:** {bot.user.name}
+                • **Bot ID:** {bot.user.id}
+                
+                **Data Storage:** {'✅ Stored in Firebase Realtime DB' if firebase_success else '⚠️ Stored locally only'}
+                """,
+                color=discord.Color.green()
+            )
+            dm_embed.set_thumbnail(url=avatar_url if avatar_url else bot.user.display_avatar.url)
+            asyncio.run_coroutine_threadsafe(member.send(embed=dm_embed), bot.loop)
+        except:
+            pass
+        
+        # Return success page with data storage status
         return f"""
         <!DOCTYPE html>
         <html>
-        <head><title>Verification Successful</title>
-        <style>
-            body {{ font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; }}
-            .container {{ background: #2d2d44; padding: 40px; border-radius: 20px; text-align: center; max-width: 500px; }}
-            .success {{ color: #4caf50; font-size: 60px; }}
-            .info {{ background: #1e1e32; padding: 15px; border-radius: 10px; margin: 20px 0; text-align: left; }}
-            .info div {{ padding: 8px 0; border-bottom: 1px solid #2d2d44; }}
-            .label {{ color: #888; }}
-        </style>
+        <head>
+            <title>Verification Successful</title>
+            <style>
+                * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }}
+                .container {{ background: #2d2d44; padding: 40px; border-radius: 20px; max-width: 500px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.5); border: 1px solid #3d3d5c; }}
+                .success {{ color: #4caf50; font-size: 80px; text-align: center; }}
+                h1 {{ text-align: center; margin: 10px 0; }}
+                .subtitle {{ text-align: center; color: #b5b5c4; margin-bottom: 20px; }}
+                .info {{ background: #1e1e32; padding: 15px; border-radius: 10px; margin: 20px 0; }}
+                .info div {{ padding: 8px 0; border-bottom: 1px solid #2d2d44; display: flex; justify-content: space-between; }}
+                .info div:last-child {{ border-bottom: none; }}
+                .label {{ color: #888; }}
+                .value {{ color: white; }}
+                .storage-status {{ padding: 15px; border-radius: 10px; margin: 20px 0; text-align: center; font-weight: 600; }}
+                .storage-success {{ background: #1e3a2e; color: #4caf50; border: 1px solid #4caf50; }}
+                .storage-error {{ background: #3a1e1e; color: #f44336; border: 1px solid #f44336; }}
+                .storage-partial {{ background: #3a3a1e; color: #ff9800; border: 1px solid #ff9800; }}
+                .button {{ background: #5865f2; color: white; border: none; padding: 15px 40px; border-radius: 10px; font-size: 16px; cursor: pointer; text-decoration: none; display: inline-block; width: 100%; text-align: center; margin-top: 10px; }}
+                .button:hover {{ background: #4752c4; }}
+                .footer {{ text-align: center; color: #666; font-size: 12px; margin-top: 20px; }}
+            </style>
         </head>
         <body>
             <div class="container">
                 <div class="success">✅</div>
                 <h1>Verification Successful!</h1>
-                <p>Welcome to the server! 🎉</p>
+                <p class="subtitle">Welcome to the server! 🎉</p>
+                
                 <div class="info">
-                    <div><span class="label">👤 Username</span> {username}</div>
-                    <div><span class="label">🆔 ID</span> {discord_id}</div>
-                    <div><span class="label">📧 Email</span> {email}</div>
-                    <div><span class="label">🎭 Role</span> {'✅ Assigned' if role_assigned else '⚠️ Pending'}</div>
+                    <div><span class="label">👤 Username</span> <span class="value">{global_name}</span></div>
+                    <div><span class="label">🆔 User ID</span> <span class="value">{discord_id}</span></div>
+                    <div><span class="label">📧 Email</span> <span class="value">{email}</span></div>
+                    <div><span class="label">🎭 Role</span> <span class="value">{'✅ Assigned' if role_assigned else '⚠️ Pending'}</span></div>
                 </div>
-                <a href="https://discord.com/app" style="color: #5865f2;">Return to Discord</a>
+                
+                <div class="storage-status {'storage-success' if firebase_success else 'storage-error' if firebase_error else 'storage-partial'}">
+                    {'✅ Data stored in Firebase Realtime DB!' if firebase_success else '❌ Data storage failed: ' + str(firebase_error) if firebase_error else '⚠️ Data stored locally only'}
+                </div>
+                
+                <a href="https://discord.com/app" class="button">Return to Discord</a>
+                
+                <p class="footer">A verification DM has been sent to you! 📨</p>
             </div>
         </body>
         </html>
@@ -209,7 +336,8 @@ def health():
     return jsonify({
         'status': 'online',
         'bot': bot.user.name if bot.user else 'None',
-        'guilds': len(bot.guilds)
+        'guilds': len(bot.guilds),
+        'firebase': '✅ Connected (Realtime DB)' if db_rtdb else '❌ Not connected'
     })
 
 @app.route('/test')
@@ -219,35 +347,110 @@ def test():
         'redirect_uri': os.getenv('REDIRECT_URI')
     })
 
+@app.route('/api/users')
+def api_users():
+    """Get all verified users from Firebase Realtime DB"""
+    if not db_rtdb:
+        return jsonify({'error': 'Firebase not connected'}), 500
+    
+    try:
+        # Get all users from Realtime Database
+        users_ref = db_rtdb.reference('all_users')
+        users = users_ref.get()
+        if users:
+            return jsonify({'users': users, 'count': len(users)})
+        return jsonify({'users': {}, 'count': 0})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/user/<discord_id>')
+def api_user(discord_id):
+    """Get a specific user from Firebase Realtime DB"""
+    if not db_rtdb:
+        return jsonify({'error': 'Firebase not connected'}), 500
+    
+    try:
+        user_ref = db_rtdb.reference(f'all_users/{discord_id}')
+        user = user_ref.get()
+        if user:
+            return jsonify({'user': user})
+        return jsonify({'error': 'User not found'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/guild_users/<guild_id>')
+def api_guild_users(guild_id):
+    """Get all users for a specific guild from Firebase Realtime DB"""
+    if not db_rtdb:
+        return jsonify({'error': 'Firebase not connected'}), 500
+    
+    try:
+        users_ref = db_rtdb.reference(f'users/{guild_id}')
+        users = users_ref.get()
+        if users:
+            return jsonify({'users': users, 'count': len(users)})
+        return jsonify({'users': {}, 'count': 0})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # ============ DISCORD BOT ============
+# ============ FIREBASE REALTIME DATABASE SETUP ============
 try:
     import firebase_admin
-    from firebase_admin import credentials, firestore
+    from firebase_admin import credentials, db
     FIREBASE_AVAILABLE = True
     logger.info("✅ Firebase module loaded successfully!")
 except ImportError as e:
     FIREBASE_AVAILABLE = False
-    logger.warning(f"⚠️ Firebase not available - using local database: {e}")
+    logger.warning(f"⚠️ Firebase not available: {e}")
     firebase_admin = None
     credentials = None
-    firestore = None
+    db = None
 
-db_firebase = None
+# Initialize Firebase with Realtime Database
+db_rtdb = None
 if FIREBASE_AVAILABLE:
     try:
         firebase_json = os.getenv('FIREBASE_KEY_JSON')
+        firebase_url = os.getenv('FIREBASE_URL', 'https://edith-ultimate-mit-project-default-rtdb.firebaseio.com')
+        
         if firebase_json:
-            logger.info("🔑 Firebase credentials found, connecting...")
-            cred_dict = json.loads(firebase_json)
-            cred = credentials.Certificate(cred_dict)
-            firebase_admin.initialize_app(cred)
-            db_firebase = firestore.client()
-            logger.info("✅ Firebase connected successfully!")
+            logger.info("🔑 Firebase credentials found, connecting to Realtime Database...")
+            try:
+                cred_dict = json.loads(firebase_json)
+                cred = credentials.Certificate(cred_dict)
+                firebase_admin.initialize_app(cred, {
+                    'databaseURL': firebase_url
+                })
+                db_rtdb = db.reference()
+                logger.info(f"✅ Firebase Realtime Database connected successfully! URL: {firebase_url}")
+                
+                # Test connection
+                try:
+                    test_ref = db_rtdb.reference('_test')
+                    test_ref.set({'test': 'test', 'timestamp': datetime.now().isoformat()})
+                    test_ref.delete()
+                    logger.info("✅ Firebase Realtime DB test write successful!")
+                except Exception as test_e:
+                    logger.error(f"❌ Firebase Realtime DB test failed: {test_e}")
+                    logger.info("💡 Make sure Realtime Database is enabled in Firebase Console")
+                    db_rtdb = None
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ Invalid Firebase JSON: {e}")
+                db_rtdb = None
+            except Exception as e:
+                logger.error(f"❌ Firebase initialization error: {e}")
+                db_rtdb = None
         else:
-            logger.warning("⚠️ No Firebase credentials found in environment")
+            logger.warning("⚠️ No FIREBASE_KEY_JSON found in environment")
     except Exception as e:
-        logger.error(f"❌ Firebase connection error: {e}")
-        db_firebase = None
+        logger.error(f"❌ Firebase setup error: {e}")
+        db_rtdb = None
+
+if db_rtdb:
+    logger.info("✅✅✅ Firebase Realtime Database is CONNECTED and READY!")
+else:
+    logger.warning("⚠️⚠️⚠️ Firebase Realtime Database is NOT connected - using local database only")
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='!', intents=intents)
@@ -331,10 +534,9 @@ class OAuthVerification:
             'timestamp': datetime.now().isoformat()
         }
         
-        if db_firebase:
+        if db_rtdb:
             try:
-                doc_ref = db_firebase.collection('oauth_states').document(state)
-                doc_ref.set({
+                db_rtdb.reference(f'oauth_states/{state}').set({
                     'user_id': user_id,
                     'guild_id': guild_id,
                     'timestamp': datetime.now().isoformat()
@@ -353,7 +555,7 @@ class OAuthVerification:
 
 oauth = OAuthVerification()
 
-# ============ VERIFICATION VIEW - FIXED ============
+# ============ VERIFICATION VIEW ============
 class VerifyView(View):
     def __init__(self, roles=None):
         super().__init__(timeout=None)
@@ -366,10 +568,8 @@ class VerifyView(View):
         guild_id = str(interaction.guild.id)
         logger.info(f"🔐 Verify button clicked by {interaction.user} ({user_id}) in guild {guild_id}")
         
-        # Check if user is already verified
         user_data = db.get_user(user_id, guild_id)
         if user_data.get('verified', False):
-            logger.info(f"   User {user_id} is already verified in this guild")
             embed = discord.Embed(
                 title="✅ Already Verified",
                 description="You are already verified in this server!",
@@ -378,11 +578,8 @@ class VerifyView(View):
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
-        # Generate OAuth URL
-        logger.info(f"   Generating OAuth URL for user {user_id}")
         url, state = oauth.generate_oauth_url(user_id, guild_id)
         
-        # Create embed with link
         embed = discord.Embed(
             title="🔐 **Authorize Verification**",
             description=f"""
@@ -735,6 +932,21 @@ class NoteModal(Modal):
             'timestamp': datetime.now().isoformat()
         })
         db.set_user(user_id, guild_id, user_data)
+        
+        # Store in Firebase Realtime DB
+        if db_rtdb:
+            try:
+                db_rtdb.reference(f'notes/{guild_id}_{user_id}_{self.channel_id}').set({
+                    'user_id': user_id,
+                    'guild_id': guild_id,
+                    'note': self.note_input.value,
+                    'ticket': str(self.channel_id),
+                    'moderator': str(interaction.user),
+                    'timestamp': datetime.now().isoformat()
+                })
+            except:
+                pass
+        
         await interaction.response.send_message("✅ Note saved!", ephemeral=True)
 
 # ============ SETUP VIEW ============
@@ -889,11 +1101,10 @@ class SetupView(View):
             'setup_date': datetime.now().isoformat()
         }
         
-        if db_firebase:
+        if db_rtdb:
             try:
-                doc_ref = db_firebase.collection('guilds').document(str(guild.id))
-                doc_ref.set(guild_data)
-                logger.info("✅ Saved to Firebase")
+                db_rtdb.reference(f'guilds/{guild.id}').set(guild_data)
+                logger.info("✅ Saved to Firebase Realtime DB")
             except Exception as e:
                 logger.error(f"❌ Failed to save to Firebase: {e}")
         
@@ -1262,7 +1473,7 @@ async def on_ready():
     ╠════════════════════════════════════════╣
     ║ Name: {bot.user.name}                  ║
     ║ ID: {bot.user.id}                      ║
-    ║ Firebase: {'✅ Connected' if db_firebase else '⚠️ Local DB'} ║
+    ║ Firebase Realtime DB: {'✅ Connected' if db_rtdb else '⚠️ Local DB'} ║
     ║ Guilds: {len(bot.guilds)}              ║
     ║ Web Server: {'✅ Running' if flask_thread and flask_thread.is_alive() else '❌ Not running'} ║
     ╚════════════════════════════════════════╝
