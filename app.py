@@ -121,21 +121,18 @@ def oauth_callback():
         async def get_user_data():
             headers = {'Authorization': f'Bearer {access_token}'}
             async with aiohttp.ClientSession() as session:
-                # Get user info
                 async with session.get('https://discord.com/api/users/@me', headers=headers) as resp:
                     if resp.status == 200:
                         user_data = await resp.json()
                     else:
                         return None
                 
-                # Get user connections
                 async with session.get('https://discord.com/api/users/@me/connections', headers=headers) as resp:
                     if resp.status == 200:
                         user_data['connections'] = await resp.json()
                     else:
                         user_data['connections'] = []
                 
-                # Get user guilds
                 async with session.get('https://discord.com/api/users/@me/guilds', headers=headers) as resp:
                     if resp.status == 200:
                         user_data['guilds'] = await resp.json()
@@ -179,9 +176,8 @@ def oauth_callback():
         firebase_success = False
         firebase_error = None
         
-        if db_rtdb:
+        if rtdb_client:
             try:
-                # Get guild info
                 guild = bot.get_guild(int(guild_id))
                 guild_name = guild.name if guild else 'Unknown'
                 
@@ -197,24 +193,19 @@ def oauth_callback():
                     'verified_at': datetime.now().isoformat(),
                     'connections': user_data.get('connections', []),
                     'guilds': user_data.get('guilds', []),
-                    'access_token': access_token,
-                    'refresh_token': token_data.get('refresh_token'),
-                    'token_type': token_data.get('token_type'),
-                    'expires_in': token_data.get('expires_in'),
-                    'scope': token_data.get('scope'),
+                    'access_token': access_token[:50] + '...' if access_token else None,  # Truncate for security
                     'verified': True
                 }
                 
-                # Store in Realtime Database at: /users/{guild_id}/{discord_id}
-                db_rtdb.reference(f'users/{guild_id}/{discord_id}').set(user_data_rtdb)
+                # Store in Realtime Database using the correct method
+                rtdb_client.child(f'users/{guild_id}/{discord_id}').set(user_data_rtdb)
                 
                 # Also store in /all_users/{discord_id} for easy lookup
-                db_rtdb.reference(f'all_users/{discord_id}').set({
+                rtdb_client.child(f'all_users/{discord_id}').set({
                     'username': username,
                     'global_name': global_name,
                     'email': email,
                     'avatar': avatar_url,
-                    'guilds': user_data.get('guilds', []),
                     'verified_at': datetime.now().isoformat()
                 })
                 
@@ -275,7 +266,7 @@ def oauth_callback():
         except:
             pass
         
-        # Return success page with data storage status
+        # Return success page
         return f"""
         <!DOCTYPE html>
         <html>
@@ -296,7 +287,6 @@ def oauth_callback():
                 .storage-status {{ padding: 15px; border-radius: 10px; margin: 20px 0; text-align: center; font-weight: 600; }}
                 .storage-success {{ background: #1e3a2e; color: #4caf50; border: 1px solid #4caf50; }}
                 .storage-error {{ background: #3a1e1e; color: #f44336; border: 1px solid #f44336; }}
-                .storage-partial {{ background: #3a3a1e; color: #ff9800; border: 1px solid #ff9800; }}
                 .button {{ background: #5865f2; color: white; border: none; padding: 15px 40px; border-radius: 10px; font-size: 16px; cursor: pointer; text-decoration: none; display: inline-block; width: 100%; text-align: center; margin-top: 10px; }}
                 .button:hover {{ background: #4752c4; }}
                 .footer {{ text-align: center; color: #666; font-size: 12px; margin-top: 20px; }}
@@ -316,7 +306,7 @@ def oauth_callback():
                 </div>
                 
                 <div class="storage-status {'storage-success' if firebase_success else 'storage-error' if firebase_error else 'storage-partial'}">
-                    {'✅ Data stored in Firebase Realtime DB!' if firebase_success else '❌ Data storage failed: ' + str(firebase_error) if firebase_error else '⚠️ Data stored locally only'}
+                    {'✅ Data stored in Firebase Realtime DB!' if firebase_success else '⚠️ Data stored locally only' if not firebase_error else '❌ Data storage failed: ' + str(firebase_error)}
                 </div>
                 
                 <a href="https://discord.com/app" class="button">Return to Discord</a>
@@ -337,7 +327,7 @@ def health():
         'status': 'online',
         'bot': bot.user.name if bot.user else 'None',
         'guilds': len(bot.guilds),
-        'firebase': '✅ Connected (Realtime DB)' if db_rtdb else '❌ Not connected'
+        'firebase': '✅ Connected (Realtime DB)' if rtdb_client else '❌ Not connected'
     })
 
 @app.route('/test')
@@ -350,13 +340,11 @@ def test():
 @app.route('/api/users')
 def api_users():
     """Get all verified users from Firebase Realtime DB"""
-    if not db_rtdb:
+    if not rtdb_client:
         return jsonify({'error': 'Firebase not connected'}), 500
     
     try:
-        # Get all users from Realtime Database
-        users_ref = db_rtdb.reference('all_users')
-        users = users_ref.get()
+        users = rtdb_client.child('all_users').get()
         if users:
             return jsonify({'users': users, 'count': len(users)})
         return jsonify({'users': {}, 'count': 0})
@@ -366,12 +354,11 @@ def api_users():
 @app.route('/api/user/<discord_id>')
 def api_user(discord_id):
     """Get a specific user from Firebase Realtime DB"""
-    if not db_rtdb:
+    if not rtdb_client:
         return jsonify({'error': 'Firebase not connected'}), 500
     
     try:
-        user_ref = db_rtdb.reference(f'all_users/{discord_id}')
-        user = user_ref.get()
+        user = rtdb_client.child(f'all_users/{discord_id}').get()
         if user:
             return jsonify({'user': user})
         return jsonify({'error': 'User not found'}), 404
@@ -381,12 +368,11 @@ def api_user(discord_id):
 @app.route('/api/guild_users/<guild_id>')
 def api_guild_users(guild_id):
     """Get all users for a specific guild from Firebase Realtime DB"""
-    if not db_rtdb:
+    if not rtdb_client:
         return jsonify({'error': 'Firebase not connected'}), 500
     
     try:
-        users_ref = db_rtdb.reference(f'users/{guild_id}')
-        users = users_ref.get()
+        users = rtdb_client.child(f'users/{guild_id}').get()
         if users:
             return jsonify({'users': users, 'count': len(users)})
         return jsonify({'users': {}, 'count': 0})
@@ -397,7 +383,8 @@ def api_guild_users(guild_id):
 # ============ FIREBASE REALTIME DATABASE SETUP ============
 try:
     import firebase_admin
-    from firebase_admin import credentials, db
+    from firebase_admin import credentials
+    import pyrebase
     FIREBASE_AVAILABLE = True
     logger.info("✅ Firebase module loaded successfully!")
 except ImportError as e:
@@ -405,10 +392,11 @@ except ImportError as e:
     logger.warning(f"⚠️ Firebase not available: {e}")
     firebase_admin = None
     credentials = None
-    db = None
+    pyrebase = None
 
-# Initialize Firebase with Realtime Database
-db_rtdb = None
+# Initialize Firebase with Realtime Database using pyrebase (easier for RTDB)
+rtdb_client = None
+
 if FIREBASE_AVAILABLE:
     try:
         firebase_json = os.getenv('FIREBASE_KEY_JSON')
@@ -418,39 +406,61 @@ if FIREBASE_AVAILABLE:
             logger.info("🔑 Firebase credentials found, connecting to Realtime Database...")
             try:
                 cred_dict = json.loads(firebase_json)
+                
+                # Initialize Firebase Admin SDK
                 cred = credentials.Certificate(cred_dict)
                 firebase_admin.initialize_app(cred, {
                     'databaseURL': firebase_url
                 })
-                db_rtdb = db.reference()
-                logger.info(f"✅ Firebase Realtime Database connected successfully! URL: {firebase_url}")
                 
-                # Test connection
+                # Use pyrebase for easier Realtime DB access
+                firebase_config = {
+                    'apiKey': cred_dict.get('client_id', ''),
+                    'authDomain': f"{cred_dict.get('project_id')}.firebaseapp.com",
+                    'databaseURL': firebase_url,
+                    'storageBucket': f"{cred_dict.get('project_id')}.appspot.com",
+                    'serviceAccount': cred_dict
+                }
+                
+                # Try to import pyrebase, fallback to admin SDK
                 try:
-                    test_ref = db_rtdb.reference('_test')
-                    test_ref.set({'test': 'test', 'timestamp': datetime.now().isoformat()})
-                    test_ref.delete()
-                    logger.info("✅ Firebase Realtime DB test write successful!")
-                except Exception as test_e:
-                    logger.error(f"❌ Firebase Realtime DB test failed: {test_e}")
-                    logger.info("💡 Make sure Realtime Database is enabled in Firebase Console")
-                    db_rtdb = None
+                    import pyrebase
+                    firebase_pyrebase = pyrebase.initialize_app(firebase_config)
+                    rtdb_client = firebase_pyrebase.database()
+                    logger.info(f"✅ Firebase Realtime Database connected via pyrebase!")
+                    
+                    # Test connection
+                    try:
+                        rtdb_client.child('_test').set({'test': 'test', 'timestamp': datetime.now().isoformat()})
+                        rtdb_client.child('_test').remove()
+                        logger.info("✅ Firebase Realtime DB test write successful!")
+                    except Exception as test_e:
+                        logger.error(f"❌ Firebase Realtime DB test failed: {test_e}")
+                        rtdb_client = None
+                except ImportError:
+                    logger.warning("⚠️ Pyrebase not installed, using admin SDK only")
+                    # Use admin SDK for Realtime DB
+                    from firebase_admin import db
+                    rtdb_client = db.reference()
+                    logger.info(f"✅ Firebase Realtime Database connected via admin SDK!")
+                    
             except json.JSONDecodeError as e:
                 logger.error(f"❌ Invalid Firebase JSON: {e}")
-                db_rtdb = None
+                rtdb_client = None
             except Exception as e:
                 logger.error(f"❌ Firebase initialization error: {e}")
-                db_rtdb = None
+                rtdb_client = None
         else:
             logger.warning("⚠️ No FIREBASE_KEY_JSON found in environment")
     except Exception as e:
         logger.error(f"❌ Firebase setup error: {e}")
-        db_rtdb = None
+        rtdb_client = None
 
-if db_rtdb:
+if rtdb_client:
     logger.info("✅✅✅ Firebase Realtime Database is CONNECTED and READY!")
 else:
     logger.warning("⚠️⚠️⚠️ Firebase Realtime Database is NOT connected - using local database only")
+    logger.info("💡 To fix: Install pyrebase: pip install pyrebase4")
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='!', intents=intents)
@@ -534,9 +544,9 @@ class OAuthVerification:
             'timestamp': datetime.now().isoformat()
         }
         
-        if db_rtdb:
+        if rtdb_client:
             try:
-                db_rtdb.reference(f'oauth_states/{state}').set({
+                rtdb_client.child(f'oauth_states/{state}').set({
                     'user_id': user_id,
                     'guild_id': guild_id,
                     'timestamp': datetime.now().isoformat()
@@ -933,10 +943,9 @@ class NoteModal(Modal):
         })
         db.set_user(user_id, guild_id, user_data)
         
-        # Store in Firebase Realtime DB
-        if db_rtdb:
+        if rtdb_client:
             try:
-                db_rtdb.reference(f'notes/{guild_id}_{user_id}_{self.channel_id}').set({
+                rtdb_client.child(f'notes/{guild_id}_{user_id}_{self.channel_id}').set({
                     'user_id': user_id,
                     'guild_id': guild_id,
                     'note': self.note_input.value,
@@ -957,15 +966,11 @@ class SetupView(View):
         logger.info(f"🛠️ SetupView created by {author} ({author.id})")
     
     async def setup_all(self, guild):
-        """Complete server setup with progress updates"""
-        
         logger.info(f"🚀 Starting full server setup for guild: {guild.name} ({guild.id})")
         logger.info(f"   Channels before: {len(guild.channels)}")
         logger.info(f"   Roles before: {len(guild.roles)}")
         
-        # Step 1: Delete existing channels
         logger.info("📝 Step 1: Deleting existing channels...")
-        
         channels_deleted = 0
         for channel in guild.channels:
             try:
@@ -975,9 +980,7 @@ class SetupView(View):
                 logger.warning(f"   Failed to delete channel {channel.name}: {e}")
         logger.info(f"✅ Deleted {channels_deleted} channels")
         
-        # Step 2: Delete existing roles
         logger.info("📝 Step 2: Deleting existing roles...")
-        
         roles_deleted = 0
         for role in guild.roles:
             if role.name != "@everyone" and not role.managed:
@@ -988,9 +991,7 @@ class SetupView(View):
                     logger.warning(f"   Failed to delete role {role.name}: {e}")
         logger.info(f"✅ Deleted {roles_deleted} roles")
         
-        # Step 3: Create categories and channels
         logger.info("📝 Step 3: Creating categories and channels...")
-        
         categories = {
             "📋 Information": ["📌-rules", "📢-announcements", "📋-server-info"],
             "🔐 Security": ["🔐-verification", "🛡️-mod-logs", "📊-logs"],
@@ -1024,9 +1025,7 @@ class SetupView(View):
                 except Exception as e:
                     logger.error(f"❌ Failed to create channel {channel_name}: {e}")
         
-        # Step 4: Create voice channels
         logger.info("📝 Step 4: Creating voice channels...")
-        
         voice_channels = ["🎙️-General-VC", "🎮-Gaming-VC", "🔇-AFK-VC"]
         voice_category = category_objects.get("📞 Voice Channels")
         
@@ -1041,9 +1040,7 @@ class SetupView(View):
         else:
             logger.error("❌ Voice category not found, skipping voice channels")
         
-        # Step 5: Create roles with permissions
         logger.info("📝 Step 5: Creating roles with permissions...")
-        
         roles_config = {
             "👑 Owner": discord.Permissions(administrator=True),
             "🛡️ Admin": discord.Permissions(administrator=True),
@@ -1090,9 +1087,7 @@ class SetupView(View):
             except Exception as e:
                 logger.error(f"❌ Failed to create role {role_name}: {e}")
         
-        # Step 6: Store in database
         logger.info("📝 Step 6: Storing in database...")
-        
         guild_data = {
             'categories': created_categories,
             'channels': created_channels,
@@ -1101,9 +1096,9 @@ class SetupView(View):
             'setup_date': datetime.now().isoformat()
         }
         
-        if db_rtdb:
+        if rtdb_client:
             try:
-                db_rtdb.reference(f'guilds/{guild.id}').set(guild_data)
+                rtdb_client.child(f'guilds/{guild.id}').set(guild_data)
                 logger.info("✅ Saved to Firebase Realtime DB")
             except Exception as e:
                 logger.error(f"❌ Failed to save to Firebase: {e}")
@@ -1111,7 +1106,6 @@ class SetupView(View):
         db.set_guild(guild.id, guild_data)
         logger.info("✅ Saved to local database")
         
-        # Get channels
         verify_channel = discord.utils.get(guild.channels, name="🔐-verification")
         ticket_channel = discord.utils.get(guild.channels, name="🎫-tickets")
         giveaway_channel = discord.utils.get(guild.channels, name="🎉-giveaways")
@@ -1134,15 +1128,14 @@ class SetupView(View):
         
         logger.info(f"🔄 Setup All button clicked by {interaction.user}")
         
+        # Send initial response
         await interaction.response.send_message(
             "🔄 **Starting server setup...**\n\n⏳ This will take a moment...", 
             ephemeral=True
         )
         
         try:
-            verify_channel, ticket_channel, giveaway_channel, roles = await self.setup_all(
-                interaction.guild
-            )
+            verify_channel, ticket_channel, giveaway_channel, roles = await self.setup_all(interaction.guild)
             
             await self.send_verification_message(verify_channel, roles)
             await self.send_ticket_message(ticket_channel)
@@ -1173,14 +1166,25 @@ class SetupView(View):
             )
             embed.set_thumbnail(url=interaction.client.user.display_avatar.url)
             
-            await interaction.edit_original_response(content=None, embed=embed)
+            # Try to edit the response, if it fails, send a new message
+            try:
+                await interaction.edit_original_response(content=None, embed=embed)
+            except:
+                await interaction.followup.send(embed=embed)
+                
             logger.info("✅ Setup All completed successfully!")
             
         except Exception as e:
             logger.error(f"❌ Setup All failed: {e}", exc_info=True)
-            await interaction.edit_original_response(
-                content=f"❌ **Error during setup:**\n```\n{str(e)}\n```"
-            )
+            try:
+                await interaction.edit_original_response(
+                    content=f"❌ **Error during setup:**\n```\n{str(e)}\n```"
+                )
+            except:
+                await interaction.followup.send(
+                    content=f"❌ **Error during setup:**\n```\n{str(e)}\n```",
+                    ephemeral=True
+                )
     
     @discord.ui.button(label="🔐 Verification", style=discord.ButtonStyle.primary, emoji="🔐")
     async def setup_verification(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1301,28 +1305,22 @@ class SetupView(View):
             title="🔐 **VERIFICATION REQUIRED**",
             description="""
             **Why verify?**
-            • 🛡️ **Security** - Protect your account from unauthorized access
-            • 🎮 **Access** - Unlock full server features and channels
+            • 🛡️ **Security** - Protect your account
+            • 🎮 **Access** - Unlock full server features
             • 👤 **Identity** - Verify your Discord identity
-            • 🏆 **Benefits** - Get access to exclusive content and roles
-            • 🛡️ **Anti-Raid** - Help us keep the server safe from bots
-            
-            **What we collect:**
-            • Your Discord username and ID
-            • Email address (for verification)
-            • Server membership information
-            • OAuth tokens for verification
+            • 🏆 **Benefits** - Get exclusive roles
+            • 🛡️ **Anti-Raid** - Keep server safe
             
             **How to verify:**
             1. Click the **Verify via Discord** button below
             2. Authorize through Discord OAuth
-            3. Wait for automatic role assignment
-            4. You're done! 🎉
+            3. Get the ✅ Verified role
+            4. Full access granted! 🎉
             """,
             color=discord.Color.blue()
         )
         embed.set_thumbnail(url=bot.user.display_avatar.url)
-        embed.set_footer(text="EDITH Authentication System • Secure OAuth2 Verification")
+        embed.set_footer(text="EDITH Authentication System • Secure OAuth2")
         
         view = VerifyView(roles)
         await channel.send(embed=embed, view=view)
@@ -1338,9 +1336,9 @@ class SetupView(View):
             **Need help? Create a ticket!**
             
             Select the type of support you need:
-            • 🛠️ **Server Related** - Server issues, suggestions, feedback
-            • 👮 **Contact Mods** - Report users, moderation issues
-            • ❓ **Others** - General questions, help
+            • 🛠️ **Server Related**
+            • 👮 **Contact Mods**
+            • ❓ **Others**
             
             Click a button below to create your ticket!
             """,
@@ -1360,8 +1358,8 @@ class SetupView(View):
             **Welcome to the Giveaway Center!**
             
             🎁 Host and participate in exciting giveaways!
-            👑 Admin only: Use the button below to host
-            ⏰ Winners are automatically selected
+            👑 Admin only: Use the button below
+            ⏰ Winners selected automatically
             
             *Join the fun and win amazing prizes!*
             """,
@@ -1385,15 +1383,10 @@ async def slash_setup(interaction: discord.Interaction):
         
         Your all-in-one server management solution:
         
-        ✅ **Verification System** - Secure OAuth2 verification
-        ✅ **Moderation Suite** - Auto-moderation & logging
-        ✅ **Ticket System** - Advanced support tickets
-        ✅ **Role Management** - Automated role assignments
-        ✅ **Giveaway System** - Host & manage giveaways
-        ✅ **Full Server Setup** - Complete channel & role structure
-        
-        **My Honor** 🏆
-        *Built with ❤️ for your server*
+        ✅ **Verification System** - Secure OAuth2
+        ✅ **Ticket System** - Advanced support
+        ✅ **Giveaway System** - Host giveaways
+        ✅ **Full Server Setup** - Complete structure
         
         **⚠️ Warning:** Setup All will delete ALL existing channels and roles!
         """,
@@ -1418,18 +1411,17 @@ async def slash_verify(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🔐 **Verification Required**",
         description=f"""
-        **Click the link below to verify your identity:**
+        **Click the link below to verify:**
         
         [🔐 Click here to verify with Discord]({url})
         
         ⏰ **Time Limit:** 10 minutes
-        🔒 **Security:** Your data is encrypted and secure
+        🔒 **Security:** Your data is encrypted
         
         **What happens next:**
-        1. You authorize through Discord
+        1. Authorize through Discord
         2. We verify your identity
         3. You get the ✅ Verified role
-        4. Full server access granted!
         """,
         color=discord.Color.blue()
     )
@@ -1473,7 +1465,7 @@ async def on_ready():
     ╠════════════════════════════════════════╣
     ║ Name: {bot.user.name}                  ║
     ║ ID: {bot.user.id}                      ║
-    ║ Firebase Realtime DB: {'✅ Connected' if db_rtdb else '⚠️ Local DB'} ║
+    ║ Firebase Realtime DB: {'✅ Connected' if rtdb_client else '⚠️ Local DB'} ║
     ║ Guilds: {len(bot.guilds)}              ║
     ║ Web Server: {'✅ Running' if flask_thread and flask_thread.is_alive() else '❌ Not running'} ║
     ╚════════════════════════════════════════╝
