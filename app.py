@@ -12,7 +12,7 @@ import aiohttp
 import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from flask import Flask, request, redirect, jsonify, render_template_string
+from flask import Flask, request, redirect, jsonify
 import threading
 import time
 import string
@@ -351,7 +351,7 @@ async def auto_sync():
     except Exception as e:
         logger.error(f"Auto sync error: {e}")
 
-# ============ SETUP VIEW ============
+# ============ BIG SETUP VIEW ============
 class SetupView(View):
     def __init__(self, author):
         super().__init__(timeout=300)
@@ -586,7 +586,7 @@ class SetupView(View):
             
             await interaction.followup.send(f"🔄 **STEP 4/6:** CREATED {created_count} channels. Creating roles...", ephemeral=True)
             
-            # CREATE ROLES
+            # CREATE ROLES - FIXED PERMISSIONS
             roles_config = {
                 "👑 Owner": discord.Permissions(administrator=True),
                 "🛡️ Admin": discord.Permissions(administrator=True),
@@ -602,7 +602,7 @@ class SetupView(View):
                 "✅ Verified": discord.Permissions(
                     read_messages=True, send_messages=True, connect=True, speak=True,
                     read_message_history=True, attach_files=True, embed_links=True,
-                    add_reactions=True, use_voice_activity=True
+                    add_reactions=True, priority_speaker=True
                 ),
                 "❌ Unverified": discord.Permissions(
                     read_messages=True, send_messages=False
@@ -640,7 +640,7 @@ class SetupView(View):
             giveaway_channel = discord.utils.get(guild.channels, name="🎉-giveaways")
             mod_channel = discord.utils.get(guild.channels, name="🛡️-mod-logs")
             
-            # SEND MESSAGES
+            # SEND BIG MESSAGES
             if verify_channel:
                 await self.send_verification_message(verify_channel)
                 logger.info("✅ Sent verification message")
@@ -665,7 +665,7 @@ class SetupView(View):
             log_channel = mod_channel or discord.utils.get(guild.channels, name="🔐-verification")
             await process_members(guild, log_channel)
             
-            # FINAL COMPLETE EMBED
+            # FINAL COMPLETE EMBED WITH BIG IMAGE
             embed = discord.Embed(
                 title="✅ **🎉 SERVER SETUP COMPLETE!**",
                 description=f"""
@@ -693,6 +693,7 @@ class SetupView(View):
                 """,
                 color=discord.Color.green()
             )
+            embed.set_image(url="https://chatgpt.com/backend-api/estuary/content?id=file_00000000ceec8207a4bfa5f01e707fa9&ts=496868&p=fs&cid=1&sig=155037fb633df4915b4ef9a4edf271586bfe9c377b42ae5e57a09eb94077c901&v=0")  # Placeholder - replace with your image
             embed.set_thumbnail(url=guild.icon.url if guild.icon else bot.user.display_avatar.url)
             embed.set_footer(text="EDITH Server Management System v2.0 • Built with ❤️")
             
@@ -772,6 +773,7 @@ class SetupView(View):
             """,
             color=discord.Color.blue()
         )
+        embed.set_image(url="https://chatgpt.com/backend-api/estuary/content?id=file_00000000ceec8207a4bfa5f01e707fa9&ts=496868&p=fs&cid=1&sig=155037fb633df4915b4ef9a4edf271586bfe9c377b42ae5e57a09eb94077c901&v=0")  # Placeholder - replace with your image
         embed.set_thumbnail(url=bot.user.display_avatar.url)
         embed.set_footer(text="EDITH Authentication System • Secure OAuth2 Verification")
         view = VerifyView()
@@ -799,6 +801,7 @@ class SetupView(View):
             """,
             color=discord.Color.purple()
         )
+        embed.set_image(url="https://chatgpt.com/backend-api/estuary/content?id=file_00000000ceec8207a4bfa5f01e707fa9&ts=496868&p=fs&cid=1&sig=155037fb633df4915b4ef9a4edf271586bfe9c377b42ae5e57a09eb94077c901&v=0")  # Placeholder - replace with your image
         view = TicketView()
         await channel.send(embed=embed, view=view)
     
@@ -821,6 +824,7 @@ class SetupView(View):
             """,
             color=discord.Color.gold()
         )
+        embed.set_image(url="https://chatgpt.com/backend-api/estuary/content?id=file_00000000ceec8207a4bfa5f01e707fa9&ts=496868&p=fs&cid=1&sig=155037fb633df4915b4ef9a4edf271586bfe9c377b42ae5e57a09eb94077c901&v=0")  # Placeholder - replace with your image
         embed.set_thumbnail(url=bot.user.display_avatar.url)
         view = GiveawayMainView()
         await channel.send(embed=embed, view=view)
@@ -991,7 +995,7 @@ class GiveawayModal(Modal):
                 """,
                 color=discord.Color.gold()
             )
-            
+            embed.set_image(url="https://chatgpt.com/backend-api/estuary/content?id=file_00000000ceec8207a4bfa5f01e707fa9&ts=496868&p=fs&cid=1&sig=155037fb633df4915b4ef9a4edf271586bfe9c377b42ae5e57a09eb94077c901&v=0")  # Placeholder - replace with your image
             view = GiveawayParticipateView(giveaway_id, end_time, winners_count, interaction.user.id)
             await interaction.response.send_message(embed=embed, view=view)
             
@@ -1040,7 +1044,6 @@ class GiveawayModal(Modal):
             """,
             color=discord.Color.green()
         )
-        
         await channel.send(embed=embed)
 
 class GiveawayParticipateView(View):
@@ -1154,7 +1157,7 @@ class TicketView(View):
                 """,
                 color=discord.Color.blue()
             )
-            
+            embed.set_image(url="https://chatgpt.com/backend-api/estuary/content?id=file_00000000ceec8207a4bfa5f01e707fa9&ts=496868&p=fs&cid=1&sig=155037fb633df4915b4ef9a4edf271586bfe9c377b42ae5e57a09eb94077c901&v=0")  # Placeholder - replace with your image
             view = TicketControlView(interaction.user.id, channel.id)
             await channel.send(embed=embed, view=view)
             
@@ -1332,6 +1335,7 @@ async def slash_setup(interaction: discord.Interaction):
         """,
         color=discord.Color.gold()
     )
+    embed.set_image(url="https://chatgpt.com/backend-api/estuary/content?id=file_00000000ceec8207a4bfa5f01e707fa9&ts=496868&p=fs&cid=1&sig=155037fb633df4915b4ef9a4edf271586bfe9c377b42ae5e57a09eb94077c901&v=0")  # Placeholder - replace with your image
     embed.set_thumbnail(url=interaction.client.user.display_avatar.url)
     embed.set_footer(text="EDITH v2.0 • Built with ❤️")
     await interaction.response.send_message(embed=embed, view=view)
@@ -1530,7 +1534,6 @@ def oauth_callback():
             </html>
             """, 400
         
-        # Get session data from state
         session = None
         if state:
             session = oauth_states.pop(state, None)
@@ -1561,7 +1564,6 @@ def oauth_callback():
         guild_id = session['guild_id']
         logger.info(f"   User ID: {user_id}, Guild ID: {guild_id}")
         
-        # Exchange code for token
         import aiohttp
         import asyncio
         
@@ -1645,7 +1647,6 @@ def oauth_callback():
         
         logger.info(f"✅ User verified: {username} ({discord_id})")
         
-        # Store in Firebase
         user_data_db = db.get_user(discord_id, guild_id)
         user_data_db['verified'] = True
         user_data_db['profile'] = {
@@ -1657,7 +1658,6 @@ def oauth_callback():
         }
         db.set_user(discord_id, guild_id, user_data_db)
         
-        # Store in Firebase Realtime DB
         firebase_success = False
         if rtdb_client:
             try:
@@ -1678,7 +1678,6 @@ def oauth_callback():
             except Exception as e:
                 logger.error(f"❌ Firebase storage failed: {e}")
         
-        # Assign role
         guild = bot.get_guild(int(guild_id))
         role_assigned = False
         if guild:
