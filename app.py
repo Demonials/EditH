@@ -9,30 +9,41 @@ import asyncio
 import random
 import re
 import aiohttp
-import base64
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import firebase_admin
-from firebase_admin import credentials, firestore
 
 # Load environment
 load_dotenv()
 
-# Initialize Firebase
-firebase_json = os.getenv('FIREBASE_KEY_JSON')
-if firebase_json:
+# Try to import Firebase with error handling
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+    FIREBASE_AVAILABLE = True
+    print("✅ Firebase module loaded successfully!")
+except ImportError:
+    FIREBASE_AVAILABLE = False
+    print("⚠️ Firebase not available - using local database")
+    firebase_admin = None
+    credentials = None
+    firestore = None
+
+# Initialize Firebase if available
+db_firebase = None
+if FIREBASE_AVAILABLE:
     try:
-        cred_dict = json.loads(firebase_json)
-        cred = credentials.Certificate(cred_dict)
-        firebase_admin.initialize_app(cred)
-        db_firebase = firestore.client()
-        print("✅ Firebase connected successfully!")
+        firebase_json = os.getenv('FIREBASE_KEY_JSON')
+        if firebase_json:
+            cred_dict = json.loads(firebase_json)
+            cred = credentials.Certificate(cred_dict)
+            firebase_admin.initialize_app(cred)
+            db_firebase = firestore.client()
+            print("✅ Firebase connected successfully!")
+        else:
+            print("⚠️ No Firebase credentials found in environment")
     except Exception as e:
         print(f"❌ Firebase connection error: {e}")
         db_firebase = None
-else:
-    print("⚠️ No Firebase credentials found, using local DB")
-    db_firebase = None
 
 # Initialize bot with slash commands
 intents = discord.Intents.all()
@@ -171,12 +182,6 @@ class OAuthVerification:
                     user_data['guilds'] = await resp.json()
                 else:
                     user_data['guilds'] = []
-            
-            # Get user email
-            async with session.get('https://discord.com/api/users/@me', headers=headers) as resp:
-                if resp.status == 200:
-                    email_data = await resp.json()
-                    user_data['email'] = email_data.get('email')
             
             return user_data
 
@@ -611,7 +616,7 @@ async def oauth_callback(ctx, code: str = None, state: str = None):
         'oauth_data': token_data
     }
     
-    # Store in Firebase
+    # Store in Firebase if available
     if db_firebase:
         try:
             doc_ref = db_firebase.collection('users').document(f"{guild_id}_{user_id}")
@@ -699,36 +704,6 @@ async def slash_setup(interaction: discord.Interaction):
     embed.set_thumbnail(url=interaction.client.user.display_avatar.url)
     await interaction.response.send_message(embed=embed, view=view)
 
-@bot.tree.command(name="verify", description="Start verification process")
-async def slash_verify(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
-    guild_id = str(interaction.guild.id)
-    
-    # Generate OAuth URL
-    url, state = oauth.generate_oauth_url(user_id, guild_id)
-    
-    embed = discord.Embed(
-        title="🔐 **Verification Required**",
-        description=f"""
-        Click the link below to verify:
-        
-        [🔐 Verify Now]({url})
-        
-        **State:** `{state[:8]}...`
-        **Expires:** 10 minutes
-        """,
-        color=discord.Color.blue()
-    )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="confirm", description="Complete verification with code (Alternative method)")
-async def slash_confirm(interaction: discord.Interaction, code: str):
-    user_id = str(interaction.user.id)
-    # This is a simple backup verification method
-    # For OAuth, use the link from /verify
-    
-    await interaction.response.send_message("✅ Please use the OAuth link from `/verify` for full verification!", ephemeral=True)
-
 # ============ TICKET SYSTEM ============
 class TicketView(View):
     def __init__(self):
@@ -778,7 +753,7 @@ class TicketView(View):
             view = TicketControlView(interaction.user.id, channel.id)
             await channel.send(embed=embed, view=view)
             
-            # Store in Firebase
+            # Store in Firebase if available
             if db_firebase:
                 try:
                     doc_ref = db_firebase.collection('tickets').document(str(channel.id))
@@ -806,7 +781,304 @@ class TicketView(View):
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
 
-# Rest of ticket controls and giveaway system remain the same as before...
+class TicketControlView(View):
+    def __init__(self, user_id, channel_id):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self.channel_id = channel_id
+    
+    @discord.ui.button(label="➕ Add User", style=discord.ButtonStyle.success)
+    async def add_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = AddUserModal(self.channel_id)
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(label="➖ Remove User", style=discord.ButtonStyle.danger)
+    async def remove_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = RemoveUserModal(self.channel_id)
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(label="⛔ Ban User", style=discord.ButtonStyle.danger)
+    async def ban_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = BanUserModal()
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(label="📄 Transcript", style=discord.ButtonStyle.secondary)
+    async def transcript(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            channel = interaction.channel
+            messages = []
+            async for msg in channel.history(limit=100):
+                messages.append(f"{msg.author}: {msg.content}")
+            
+            transcript = "\n".join(reversed(messages))
+            import io
+            file = discord.File(io.BytesIO(transcript.encode()), f"transcript-{channel.name}.txt")
+            await interaction.followup.send(file=file, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+    
+    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger)
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator and interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ No permission!", ephemeral=True)
+            return
+        
+        await interaction.response.defer()
+        channel = interaction.channel
+        await channel.send("🔒 Closing ticket...")
+        db.data['tickets'][str(channel.id)]['status'] = 'closed'
+        db.save_data()
+        await asyncio.sleep(2)
+        await channel.delete()
+    
+    @discord.ui.button(label="📝 Special Note", style=discord.ButtonStyle.primary)
+    async def special_note(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = NoteModal(self.channel_id)
+        await interaction.response.send_modal(modal)
+
+class AddUserModal(Modal):
+    def __init__(self, channel_id):
+        super().__init__(title="Add User")
+        self.channel_id = channel_id
+        self.user_id_input = TextInput(label="User ID or Mention", required=True)
+        self.add_item(self.user_id_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        channel = interaction.guild.get_channel(self.channel_id)
+        try:
+            user_id = int(re.search(r'\d+', self.user_id_input.value).group())
+            user = await interaction.guild.fetch_member(user_id)
+            if user:
+                await channel.set_permissions(user, read_messages=True, send_messages=True)
+                await channel.send(f"✅ {user.mention} added to ticket!")
+                await interaction.response.send_message("✅ User added!", ephemeral=True)
+        except:
+            await interaction.response.send_message("❌ Invalid user!", ephemeral=True)
+
+class RemoveUserModal(Modal):
+    def __init__(self, channel_id):
+        super().__init__(title="Remove User")
+        self.channel_id = channel_id
+        self.user_id_input = TextInput(label="User ID or Mention", required=True)
+        self.add_item(self.user_id_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        channel = interaction.guild.get_channel(self.channel_id)
+        try:
+            user_id = int(re.search(r'\d+', self.user_id_input.value).group())
+            user = await interaction.guild.fetch_member(user_id)
+            if user:
+                await channel.set_permissions(user, read_messages=False, send_messages=False)
+                await channel.send(f"❌ {user.mention} removed from ticket!")
+                await interaction.response.send_message("✅ User removed!", ephemeral=True)
+        except:
+            await interaction.response.send_message("❌ Invalid user!", ephemeral=True)
+
+class BanUserModal(Modal):
+    def __init__(self):
+        super().__init__(title="Ban User")
+        self.user_id_input = TextInput(label="User ID", required=True)
+        self.reason_input = TextInput(label="Reason", required=False)
+        self.add_item(self.user_id_input)
+        self.add_item(self.reason_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            user_id = int(self.user_id_input.value)
+            user = await interaction.guild.fetch_member(user_id)
+            if user:
+                await user.ban(reason=self.reason_input.value or "Banned from ticket")
+                await interaction.response.send_message(f"✅ Banned {user.mention}!", ephemeral=True)
+                await interaction.channel.send(f"⛔ {user.mention} has been banned!")
+        except:
+            await interaction.response.send_message("❌ Failed to ban user!", ephemeral=True)
+
+class NoteModal(Modal):
+    def __init__(self, channel_id):
+        super().__init__(title="Add Special Note")
+        self.channel_id = channel_id
+        self.note_input = TextInput(label="Note", style=discord.TextStyle.paragraph, required=True)
+        self.add_item(self.note_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild.id)
+        user_data = db.get_user(user_id, guild_id)
+        if 'notes' not in user_data:
+            user_data['notes'] = []
+        user_data['notes'].append({
+            'note': self.note_input.value,
+            'ticket': str(self.channel_id),
+            'moderator': str(interaction.user),
+            'timestamp': datetime.now().isoformat()
+        })
+        db.set_user(user_id, guild_id, user_data)
+        
+        # Store in Firebase if available
+        if db_firebase:
+            try:
+                doc_ref = db_firebase.collection('user_notes').document(f"{guild_id}_{user_id}_{self.channel_id}")
+                doc_ref.set({
+                    'user_id': user_id,
+                    'guild_id': guild_id,
+                    'note': self.note_input.value,
+                    'ticket': str(self.channel_id),
+                    'moderator': str(interaction.user),
+                    'timestamp': datetime.now().isoformat()
+                })
+            except:
+                pass
+        
+        await interaction.response.send_message("✅ Note saved!", ephemeral=True)
+
+# ============ GIVEAWAY SYSTEM ============
+class GiveawayMainView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+    
+    @discord.ui.button(label="🎁 Host Giveaway", style=discord.ButtonStyle.success)
+    async def host_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Not enough permissions kiddo! 👶", ephemeral=True)
+            return
+        modal = GiveawayModal()
+        await interaction.response.send_modal(modal)
+
+class GiveawayModal(Modal):
+    def __init__(self):
+        super().__init__(title="Host Giveaway")
+        self.name = TextInput(label="Giveaway Name", required=True)
+        self.duration = TextInput(label="Duration (minutes)", required=True)
+        self.winners = TextInput(label="Number of Winners", required=True)
+        self.prize = TextInput(label="Prize", required=True)
+        self.add_item(self.name)
+        self.add_item(self.duration)
+        self.add_item(self.winners)
+        self.add_item(self.prize)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            duration_minutes = int(self.duration.value)
+            winners_count = int(self.winners.value)
+            end_time = datetime.now() + timedelta(minutes=duration_minutes)
+            giveaway_id = secrets.token_hex(8)
+            
+            embed = discord.Embed(
+                title=f"🎉 {self.name.value}",
+                description=f"""
+                **Prize:** {self.prize.value}
+                **Host:** {interaction.user.mention}
+                **Duration:** {duration_minutes} minutes
+                **Winners:** {winners_count}
+                **Ends:** {end_time.strftime('%Y-%m-%d %H:%M:%S')}
+                """,
+                color=discord.Color.gold()
+            )
+            embed.set_thumbnail(url=interaction.client.user.display_avatar.url)
+            
+            view = GiveawayParticipateView(giveaway_id, end_time, winners_count, interaction.user.id)
+            await interaction.response.send_message(embed=embed, view=view)
+            
+            db.data['giveaways'][giveaway_id] = {
+                'name': self.name.value,
+                'prize': self.prize.value,
+                'host': interaction.user.id,
+                'winners': winners_count,
+                'end_time': end_time.isoformat(),
+                'participants': []
+            }
+            db.save_data()
+            
+            asyncio.create_task(self.giveaway_countdown(giveaway_id, interaction.channel, end_time))
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid numbers!", ephemeral=True)
+    
+    async def giveaway_countdown(self, giveaway_id, channel, end_time):
+        await asyncio.sleep((end_time - datetime.now()).total_seconds())
+        giveaway_data = db.data['giveaways'].get(giveaway_id)
+        if not giveaway_data:
+            return
+        
+        participants = giveaway_data.get('participants', [])
+        if len(participants) < giveaway_data['winners']:
+            await channel.send(f"❌ Not enough participants for **{giveaway_data['name']}**!")
+            return
+        
+        winners = random.sample(participants, min(giveaway_data['winners'], len(participants)))
+        winner_mentions = [f"<@{winner}>" for winner in winners]
+        
+        embed = discord.Embed(
+            title="🎉 GIVEAWAY COMPLETE!",
+            description=f"""
+            **Giveaway:** {giveaway_data['name']}
+            **Prize:** {giveaway_data['prize']}
+            **Winners:** {', '.join(winner_mentions)}
+            
+            🎊 Congratulations! Create a ticket within 24 hours to claim!
+            """,
+            color=discord.Color.green()
+        )
+        
+        giveaway_role = discord.utils.get(channel.guild.roles, name="🎁 Giveaway")
+        host = giveaway_data['host']
+        
+        await channel.send(f"{giveaway_role.mention if giveaway_role else '@everyone'} <@{host}>")
+        await channel.send(embed=embed)
+
+class GiveawayParticipateView(View):
+    def __init__(self, giveaway_id, end_time, winners_count, host_id):
+        super().__init__(timeout=None)
+        self.giveaway_id = giveaway_id
+        self.end_time = end_time
+        self.host_id = host_id
+    
+    @discord.ui.button(label="🎯 Participate", style=discord.ButtonStyle.success)
+    async def participate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        giveaway_data = db.data['giveaways'].get(self.giveaway_id)
+        if not giveaway_data:
+            await interaction.response.send_message("❌ Giveaway not found!", ephemeral=True)
+            return
+        if datetime.now() > datetime.fromisoformat(giveaway_data['end_time']):
+            await interaction.response.send_message("❌ Giveaway ended!", ephemeral=True)
+            return
+        if interaction.user.id in giveaway_data['participants']:
+            await interaction.response.send_message("❌ Already participating!", ephemeral=True)
+            return
+        
+        giveaway_data['participants'].append(interaction.user.id)
+        db.save_data()
+        await interaction.response.send_message("✅ You're participating!", ephemeral=True)
+    
+    @discord.ui.button(label="❌ Un-Participate", style=discord.ButtonStyle.danger)
+    async def unparticipate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        giveaway_data = db.data['giveaways'].get(self.giveaway_id)
+        if giveaway_data and interaction.user.id in giveaway_data['participants']:
+            giveaway_data['participants'].remove(interaction.user.id)
+            db.save_data()
+            await interaction.response.send_message("✅ Removed from giveaway!", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Not participating!", ephemeral=True)
+    
+    @discord.ui.button(label="🗑️ Delete Giveaway", style=discord.ButtonStyle.danger)
+    async def delete_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.host_id and not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Not enough permissions kiddo! 👶", ephemeral=True)
+            return
+        del db.data['giveaways'][self.giveaway_id]
+        db.save_data()
+        await interaction.response.send_message("✅ Giveaway deleted!", ephemeral=True)
+        await interaction.message.delete()
+    
+    @discord.ui.button(label="🔄 Reroll", style=discord.ButtonStyle.primary)
+    async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.host_id and not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Not enough permissions kiddo! 👶", ephemeral=True)
+            return
+        giveaway_data = db.data['giveaways'].get(self.giveaway_id)
+        if giveaway_data and giveaway_data['participants']:
+            new_winner = random.choice(giveaway_data['participants'])
+            await interaction.response.send_message(f"🔄 New winner: <@{new_winner}>!", ephemeral=True)
 
 # ============ MODERATION ============
 @bot.event
@@ -815,7 +1087,7 @@ async def on_message(message):
         return
     
     # Bad word filter
-    bad_words = ['badword1', 'badword2', 'badword3', 'fuck', 'shit', 'damn', 'asshole']
+    bad_words = ['badword1', 'badword2', 'badword3', 'fuck', 'shit', 'damn', 'asshole', 'bitch']
     if any(word in message.content.lower() for word in bad_words):
         try:
             await message.delete()
