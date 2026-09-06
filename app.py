@@ -76,6 +76,7 @@ class SimpleDB:
             pass
     
     def get_user(self, user_id, guild_id):
+        """Get user data for specific guild"""
         user_id = str(user_id)
         guild_id = str(guild_id)
         if guild_id not in self.data['users']:
@@ -85,18 +86,31 @@ class SimpleDB:
                 'verified': False,
                 'profile': {},
                 'tickets': [],
-                'notes': []
+                'notes': [],
+                'guild_id': guild_id,
+                'user_id': user_id,
+                'verified_at': None
             }
             self.save_data()
         return self.data['users'][guild_id][user_id]
     
     def set_user(self, user_id, guild_id, data):
+        """Set user data for specific guild"""
         user_id = str(user_id)
         guild_id = str(guild_id)
         if guild_id not in self.data['users']:
             self.data['users'][guild_id] = {}
         self.data['users'][guild_id][user_id] = data
         self.save_data()
+    
+    def check_user_verified(self, user_id, guild_id):
+        """Check if user is verified in specific guild"""
+        user_id = str(user_id)
+        guild_id = str(guild_id)
+        if guild_id in self.data['users']:
+            if user_id in self.data['users'][guild_id]:
+                return self.data['users'][guild_id][user_id].get('verified', False)
+        return False
     
     def get_guild(self, guild_id):
         guild_id = str(guild_id)
@@ -525,6 +539,17 @@ class VerifyView(View):
         user_id = str(interaction.user.id)
         guild_id = str(interaction.guild.id)
         
+        # Check if user is already verified
+        user_data = db.get_user(user_id, guild_id)
+        if user_data.get('verified', False):
+            embed = discord.Embed(
+                title="✅ Already Verified",
+                description="You are already verified in this server!",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
         # Generate OAuth URL
         url, state = oauth.generate_oauth_url(user_id, guild_id)
         
@@ -583,6 +608,15 @@ async def oauth_callback(ctx, code: str = None, state: str = None):
         await ctx.send("❌ Session expired or invalid! Please try `/verify` again.", ephemeral=True)
         return
     
+    user_id = session['user_id']
+    guild_id = session['guild_id']
+    
+    # Check if user is already verified (prevent duplicate verification)
+    user_data = db.get_user(user_id, guild_id)
+    if user_data.get('verified', False):
+        await ctx.send("✅ You are already verified in this server!", ephemeral=True)
+        return
+    
     # Exchange code for token
     token_data = await oauth.exchange_code(code)
     if not token_data:
@@ -592,85 +626,144 @@ async def oauth_callback(ctx, code: str = None, state: str = None):
     access_token = token_data.get('access_token')
     
     # Get user data
-    user_data = await oauth.get_user_data(access_token)
-    if not user_data:
+    user_data_discord = await oauth.get_user_data(access_token)
+    if not user_data_discord:
         await ctx.send("❌ Failed to get user data! Please try again.", ephemeral=True)
         return
     
-    # Store user data
-    user_id = session['user_id']
-    guild_id = session['guild_id']
+    # Check if user is in the guild
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        await ctx.send("❌ Server not found!", ephemeral=True)
+        return
     
+    member = guild.get_member(int(user_id))
+    if not member:
+        await ctx.send("❌ You are not in this server!", ephemeral=True)
+        return
+    
+    # Create/Update user profile (guild-specific)
     user_profile = {
-        'discord_id': user_data.get('id'),
-        'username': user_data.get('username'),
-        'global_name': user_data.get('global_name'),
-        'email': user_data.get('email'),
-        'avatar': user_data.get('avatar'),
-        'verified_email': user_data.get('verified', False),
+        'discord_id': user_data_discord.get('id'),
+        'username': user_data_discord.get('username'),
+        'global_name': user_data_discord.get('global_name'),
+        'email': user_data_discord.get('email'),
+        'avatar': user_data_discord.get('avatar'),
+        'verified_email': user_data_discord.get('verified', False),
         'guild_id': guild_id,
-        'connections': user_data.get('connections', []),
-        'guilds': user_data.get('guilds', []),
+        'guild_name': guild.name,
+        'connections': user_data_discord.get('connections', []),
+        'guilds': user_data_discord.get('guilds', []),
         'access_token': access_token,
         'verified_at': datetime.now().isoformat(),
-        'oauth_data': token_data
+        'oauth_data': token_data,
+        'verified': True
     }
+    
+    # Update user data (don't overwrite, merge with existing)
+    if not user_data:
+        user_data = {
+            'verified': True,
+            'profile': user_profile,
+            'guild_id': guild_id,
+            'user_id': user_id,
+            'verified_at': datetime.now().isoformat(),
+            'tickets': [],
+            'notes': []
+        }
+    else:
+        # Update existing data
+        user_data['verified'] = True
+        user_data['profile'] = user_profile
+        user_data['verified_at'] = datetime.now().isoformat()
     
     # Store in Firebase if available
     if db_firebase:
         try:
             doc_ref = db_firebase.collection('users').document(f"{guild_id}_{user_id}")
-            doc_ref.set({
-                'verified': True,
-                'profile': user_profile,
-                'verified_at': datetime.now().isoformat(),
-                'guild_id': guild_id
-            })
+            doc_ref.set(user_data)
         except Exception as e:
             print(f"Firebase error: {e}")
     
     # Store locally
-    user_data_local = db.get_user(user_id, guild_id)
-    user_data_local['verified'] = True
-    user_data_local['profile'] = user_profile
-    db.set_user(user_id, guild_id, user_data_local)
+    db.set_user(user_id, guild_id, user_data)
     
     # Assign roles
-    guild = bot.get_guild(int(guild_id))
-    if guild:
-        member = guild.get_member(int(user_id))
-        if member:
-            verified_role = discord.utils.get(guild.roles, name="✅ Verified")
-            unverified_role = discord.utils.get(guild.roles, name="❌ Unverified")
-            
-            if verified_role:
-                if unverified_role:
-                    await member.remove_roles(unverified_role)
-                await member.add_roles(verified_role)
+    verified_role = discord.utils.get(guild.roles, name="✅ Verified")
+    unverified_role = discord.utils.get(guild.roles, name="❌ Unverified")
     
-    # Send success message
+    if verified_role:
+        if unverified_role:
+            await member.remove_roles(unverified_role)
+        await member.add_roles(verified_role)
+    
+    # Send verification DM to user
+    try:
+        dm_embed = discord.Embed(
+            title="✅ **Verification Successful!**",
+            description=f"""
+            **Welcome to {guild.name}!** 🎉
+            
+            Your identity has been successfully verified!
+            
+            **Server Details:**
+            • **Server:** {guild.name}
+            • **Server ID:** {guild.id}
+            • **Member Count:** {guild.member_count}
+            • **Verified At:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            
+            **Your Details:**
+            • **Username:** {user_data_discord.get('global_name', user_data_discord.get('username'))}
+            • **Discord ID:** {user_data_discord.get('id')}
+            • **Email:** {user_data_discord.get('email', 'Not provided')}
+            
+            **Bot Details:**
+            • **Bot Name:** {bot.user.name}
+            • **Bot ID:** {bot.user.id}
+            • **Bot Developer:** EDITH Team
+            
+            **What's Next?**
+            • You now have access to all server channels
+            • You can participate in giveaways
+            • You can create tickets for support
+            • Enjoy the server! 🎮
+            
+            *Thank you for verifying!*
+            """,
+            color=discord.Color.green()
+        )
+        dm_embed.set_thumbnail(url=bot.user.display_avatar.url)
+        dm_embed.set_footer(text=f"EDITH Authentication System • Verified at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        await member.send(embed=dm_embed)
+    except:
+        # If DM fails, send in channel
+        pass
+    
+    # Send success message in channel
     embed = discord.Embed(
         title="✅ **VERIFICATION SUCCESSFUL!**",
         description=f"""
-        **Welcome {user_data.get('global_name', user_data.get('username'))}!** 🎉
+        **Welcome {user_data_discord.get('global_name', user_data_discord.get('username'))}!** 🎉
         
-        You have been successfully verified!
+        You have been successfully verified in **{guild.name}**!
         
         **User Information:**
-        • **Username:** {user_data.get('username')}
-        • **Email:** {user_data.get('email', 'Not provided')}
-        • **Verified Email:** {'✅' if user_data.get('verified') else '❌'}
-        • **Server:** {guild.name if guild else 'Unknown'}
+        • **Username:** {user_data_discord.get('username')}
+        • **Email:** {user_data_discord.get('email', 'Not provided')}
+        • **Verified Email:** {'✅' if user_data_discord.get('verified') else '❌'}
+        • **Server:** {guild.name}
         • **Verified At:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         
         **Role Updated:** ✅ Verified
         **Access:** Full server access granted!
         
-        You can now enjoy all server features!
+        A verification DM has been sent to you! 📨
         """,
         color=discord.Color.green()
     )
     embed.set_thumbnail(url=bot.user.display_avatar.url)
+    embed.set_footer(text="EDITH Authentication System")
     
     await ctx.send(embed=embed)
 
@@ -1102,12 +1195,24 @@ async def on_message(message):
 
 @bot.event
 async def on_member_join(member):
-    unverified_role = discord.utils.get(member.guild.roles, name="❌ Unverified")
-    if unverified_role:
-        try:
-            await member.add_roles(unverified_role)
-        except:
-            pass
+    # Check if user is already verified in this guild
+    user_data = db.get_user(str(member.id), str(member.guild.id))
+    if user_data.get('verified', False):
+        # User was verified before, re-assign roles
+        verified_role = discord.utils.get(member.guild.roles, name="✅ Verified")
+        unverified_role = discord.utils.get(member.guild.roles, name="❌ Unverified")
+        if verified_role:
+            if unverified_role:
+                await member.remove_roles(unverified_role)
+            await member.add_roles(verified_role)
+    else:
+        # New user, assign unverified role
+        unverified_role = discord.utils.get(member.guild.roles, name="❌ Unverified")
+        if unverified_role:
+            try:
+                await member.add_roles(unverified_role)
+            except:
+                pass
 
 @bot.event
 async def on_ready():
