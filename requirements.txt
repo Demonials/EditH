@@ -14,3 +14,4 @@ eventlet==0.33.3
 gevent==23.9.1
 gevent-websocket==0.10.1
 typing-extensions==4.8.0
+firebase-admin==6.4.0
