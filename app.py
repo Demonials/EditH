@@ -217,10 +217,21 @@ def delete_credentials(user_id):
     firebase_delete(f'credentials_by_username/{user_id}')
     logger.info(f"🗑️ Deleted credentials for {user_id}")
 
+# Track which users already have credentials to avoid spam
+sent_credentials_cache = {}
+
 async def send_credentials_dm(member, creds, role=None, log_channel=None):
-    """Send credentials via DM and log to channel"""
+    """Send credentials via DM and log to channel (with spam protection)"""
     if not creds:
         return False
+    
+    user_id = str(member.id)
+    
+    # Check if we already sent credentials recently (spam protection)
+    if user_id in sent_credentials_cache:
+        last_sent = sent_credentials_cache[user_id]
+        if (datetime.now() - last_sent).seconds < 60:  # Only send once per minute
+            return True
     
     role = role or creds.get('role', 'member')
     
@@ -239,6 +250,9 @@ async def send_credentials_dm(member, creds, role=None, log_channel=None):
     try:
         await member.send(embed=embed)
         logger.info(f"✅ Credentials sent to {member.name}")
+        
+        # Update cache
+        sent_credentials_cache[user_id] = datetime.now()
         
         if log_channel:
             log_embed = discord.Embed(
@@ -313,7 +327,6 @@ async def process_members(guild, log_channel=None):
             }
             
             if is_verified:
-                # Add credentials to verified user data
                 creds = get_credentials(user_id)
                 if creds:
                     user_data['credentials'] = creds
@@ -490,6 +503,7 @@ class SetupView(View):
             • 🗑️ Credentials auto-delete when user leaves
             • 📝 Logged to #🛡️-mod-logs
             • 📧 Credentials sent via DM
+            • 🛡️ Spam protection (1 per minute per user)
             
             **🔒 SECURITY:**
             • Passwords are securely generated
@@ -510,8 +524,9 @@ class SetupView(View):
                 try:
                     await channel.delete()
                     channel_count += 1
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Could not delete channel: {e}")
+            
             logger.info(f"🗑️ Deleted {channel_count} channels")
             
             # Delete roles
@@ -521,9 +536,13 @@ class SetupView(View):
                     try:
                         await role.delete()
                         role_count += 1
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Could not delete role: {e}")
+            
             logger.info(f"🗑️ Deleted {role_count} roles")
+            
+            # Wait a moment for Discord to process deletions
+            await asyncio.sleep(2)
             
             await interaction.followup.send("🔄 **STEP 2/5:** Creating new server structure...", ephemeral=True)
             
@@ -542,9 +561,13 @@ class SetupView(View):
             created_count = 0
             
             for category_name, channel_names in categories.items():
-                category = await guild.create_category(category_name)
-                category_objects[category_name] = category
-                logger.info(f"✅ Created category: {category_name}")
+                try:
+                    category = await guild.create_category(category_name)
+                    category_objects[category_name] = category
+                    logger.info(f"✅ Created category: {category_name}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to create category {category_name}: {e}")
+                    continue
                 
                 for channel_name in channel_names:
                     try:
@@ -635,6 +658,7 @@ class SetupView(View):
                 • 📧 Credentials sent via DM
                 • 📝 Logged in #🛡️-mod-logs
                 • 🔄 Auto-sync every 5 seconds
+                • 🛡️ Spam protection enabled
                 
                 🎉 **Your server is ready to go!**
                 """,
@@ -644,7 +668,7 @@ class SetupView(View):
             embed.set_footer(text="EDITH Server Management System v2.0")
             
             await interaction.followup.send(embed=embed, ephemeral=True)
-            logger.info("✅ Setup complete for {guild.name}")
+            logger.info(f"✅ Setup complete for {guild.name}")
             
         except Exception as e:
             logger.error(f"Setup error: {e}")
@@ -1457,7 +1481,6 @@ async def on_member_remove(member):
     if member.bot:
         return
     
-    # Delete credentials only
     delete_credentials(str(member.id))
     logger.info(f"👋 {member.name} left {member.guild.name} - credentials deleted")
 
