@@ -351,7 +351,7 @@ async def auto_sync():
     except Exception as e:
         logger.error(f"Auto sync error: {e}")
 
-# ============ BIG SETUP VIEW ============
+# ============ BIG SETUP VIEW WITH ALL BUTTONS ============
 class SetupView(View):
     def __init__(self, author):
         super().__init__(timeout=300)
@@ -496,14 +496,11 @@ class SetupView(View):
     
     async def setup_all(self, guild, interaction):
         try:
-            # Get the channel where command was run (keep this one)
             command_channel = interaction.channel
-            command_channel_name = command_channel.name
             
-            await interaction.followup.send("🔄 **STEP 1/6:** DELETING existing channels (keeping this one)...", ephemeral=True)
+            await interaction.followup.send("🔄 **STEP 1/6:** DELETING existing channels...", ephemeral=True)
             logger.info("🗑️ DELETING all channels except command channel...")
             
-            # DELETE ALL EXISTING CHANNELS EXCEPT THE COMMAND CHANNEL
             channel_count = 0
             for channel in guild.channels:
                 if channel.id == command_channel.id:
@@ -520,7 +517,6 @@ class SetupView(View):
             
             await interaction.followup.send(f"🔄 **STEP 2/6:** DELETED {channel_count} channels. Deleting roles...", ephemeral=True)
             
-            # DELETE ALL EXISTING ROLES
             role_count = 0
             for role in guild.roles:
                 if role.name != "@everyone" and not role.managed:
@@ -535,10 +531,8 @@ class SetupView(View):
             
             await interaction.followup.send(f"🔄 **STEP 3/6:** DELETED {role_count} roles. Creating new structure...", ephemeral=True)
             
-            # Wait for Discord to process deletions
             await asyncio.sleep(2)
             
-            # CREATE NEW CATEGORIES AND CHANNELS
             categories = {
                 "📋 INFORMATION": ["📌-rules", "📢-announcements", "📋-server-info"],
                 "🔐 SECURITY": ["🔐-verification", "🛡️-mod-logs", "📊-logs"],
@@ -571,7 +565,6 @@ class SetupView(View):
                     except Exception as e:
                         logger.error(f"❌ Failed to create {channel_name}: {e}")
             
-            # Create voice channels
             if "📞 VOICE CHANNELS" in category_objects:
                 for vc_name in ["🎙️-General-VC", "🎮-Gaming-VC", "🔇-AFK-VC"]:
                     try:
@@ -586,7 +579,6 @@ class SetupView(View):
             
             await interaction.followup.send(f"🔄 **STEP 4/6:** CREATED {created_count} channels. Creating roles...", ephemeral=True)
             
-            # CREATE ROLES - FIXED PERMISSIONS
             roles_config = {
                 "👑 Owner": discord.Permissions(administrator=True),
                 "🛡️ Admin": discord.Permissions(administrator=True),
@@ -632,7 +624,6 @@ class SetupView(View):
             
             await interaction.followup.send(f"🔄 **STEP 5/6:** CREATED {role_count} roles. Setting up systems...", ephemeral=True)
             
-            # GET CHANNELS
             await asyncio.sleep(2)
             
             verify_channel = discord.utils.get(guild.channels, name="🔐-verification")
@@ -640,7 +631,6 @@ class SetupView(View):
             giveaway_channel = discord.utils.get(guild.channels, name="🎉-giveaways")
             mod_channel = discord.utils.get(guild.channels, name="🛡️-mod-logs")
             
-            # SEND BIG MESSAGES
             if verify_channel:
                 await self.send_verification_message(verify_channel)
                 logger.info("✅ Sent verification message")
@@ -661,11 +651,9 @@ class SetupView(View):
             
             await interaction.followup.send("🔄 **STEP 6/6:** Syncing members and generating credentials...", ephemeral=True)
             
-            # SYNC MEMBERS
             log_channel = mod_channel or discord.utils.get(guild.channels, name="🔐-verification")
             await process_members(guild, log_channel)
             
-            # FINAL COMPLETE EMBED WITH BIG IMAGE
             embed = discord.Embed(
                 title="✅ **🎉 SERVER SETUP COMPLETE!**",
                 description=f"""
@@ -693,7 +681,7 @@ class SetupView(View):
                 """,
                 color=discord.Color.green()
             )
-            embed.set_image(url="https://chatgpt.com/backend-api/estuary/content?id=file_00000000ceec8207a4bfa5f01e707fa9&ts=496868&p=fs&cid=1&sig=155037fb633df4915b4ef9a4edf271586bfe9c377b42ae5e57a09eb94077c901&v=0")  # Placeholder - replace with your image
+            embed.set_image(url="https://i.imgur.com/your-image-here.png")
             embed.set_thumbnail(url=guild.icon.url if guild.icon else bot.user.display_avatar.url)
             embed.set_footer(text="EDITH Server Management System v2.0 • Built with ❤️")
             
@@ -773,7 +761,7 @@ class SetupView(View):
             """,
             color=discord.Color.blue()
         )
-        embed.set_image(url="https://chatgpt.com/backend-api/estuary/content?id=file_00000000ceec8207a4bfa5f01e707fa9&ts=496868&p=fs&cid=1&sig=155037fb633df4915b4ef9a4edf271586bfe9c377b42ae5e57a09eb94077c901&v=0")  # Placeholder - replace with your image
+        embed.set_image(url="https://i.imgur.com/your-image-here.png")
         embed.set_thumbnail(url=bot.user.display_avatar.url)
         embed.set_footer(text="EDITH Authentication System • Secure OAuth2 Verification")
         view = VerifyView()
@@ -801,7 +789,7 @@ class SetupView(View):
             """,
             color=discord.Color.purple()
         )
-        embed.set_image(url="https://chatgpt.com/backend-api/estuary/content?id=file_00000000ceec8207a4bfa5f01e707fa9&ts=496868&p=fs&cid=1&sig=155037fb633df4915b4ef9a4edf271586bfe9c377b42ae5e57a09eb94077c901&v=0")  # Placeholder - replace with your image
+        embed.set_image(url="https://i.imgur.com/your-image-here.png")
         view = TicketView()
         await channel.send(embed=embed, view=view)
     
@@ -824,7 +812,7 @@ class SetupView(View):
             """,
             color=discord.Color.gold()
         )
-        embed.set_image(url="https://chatgpt.com/backend-api/estuary/content?id=file_00000000ceec8207a4bfa5f01e707fa9&ts=496868&p=fs&cid=1&sig=155037fb633df4915b4ef9a4edf271586bfe9c377b42ae5e57a09eb94077c901&v=0")  # Placeholder - replace with your image
+        embed.set_image(url="https://i.imgur.com/your-image-here.png")
         embed.set_thumbnail(url=bot.user.display_avatar.url)
         view = GiveawayMainView()
         await channel.send(embed=embed, view=view)
@@ -995,7 +983,7 @@ class GiveawayModal(Modal):
                 """,
                 color=discord.Color.gold()
             )
-            embed.set_image(url="https://chatgpt.com/backend-api/estuary/content?id=file_00000000ceec8207a4bfa5f01e707fa9&ts=496868&p=fs&cid=1&sig=155037fb633df4915b4ef9a4edf271586bfe9c377b42ae5e57a09eb94077c901&v=0")  # Placeholder - replace with your image
+            embed.set_image(url="https://i.imgur.com/your-image-here.png")
             view = GiveawayParticipateView(giveaway_id, end_time, winners_count, interaction.user.id)
             await interaction.response.send_message(embed=embed, view=view)
             
@@ -1157,7 +1145,7 @@ class TicketView(View):
                 """,
                 color=discord.Color.blue()
             )
-            embed.set_image(url="https://chatgpt.com/backend-api/estuary/content?id=file_00000000ceec8207a4bfa5f01e707fa9&ts=496868&p=fs&cid=1&sig=155037fb633df4915b4ef9a4edf271586bfe9c377b42ae5e57a09eb94077c901&v=0")  # Placeholder - replace with your image
+            embed.set_image(url="https://i.imgur.com/your-image-here.png")
             view = TicketControlView(interaction.user.id, channel.id)
             await channel.send(embed=embed, view=view)
             
@@ -1335,7 +1323,7 @@ async def slash_setup(interaction: discord.Interaction):
         """,
         color=discord.Color.gold()
     )
-    embed.set_image(url="https://chatgpt.com/backend-api/estuary/content?id=file_00000000ceec8207a4bfa5f01e707fa9&ts=496868&p=fs&cid=1&sig=155037fb633df4915b4ef9a4edf271586bfe9c377b42ae5e57a09eb94077c901&v=0")  # Placeholder - replace with your image
+    embed.set_image(url="https://i.imgur.com/your-image-here.png")
     embed.set_thumbnail(url=interaction.client.user.display_avatar.url)
     embed.set_footer(text="EDITH v2.0 • Built with ❤️")
     await interaction.response.send_message(embed=embed, view=view)
