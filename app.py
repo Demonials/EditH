@@ -239,8 +239,8 @@ async def send_credentials_dm(member, creds, role=None, log_channel=None):
     embed.add_field(name="📝 USERNAME", value=f"`{creds['username']}`", inline=True)
     embed.add_field(name="🔑 PASSWORD", value=f"`{creds['password']}`", inline=True)
     embed.add_field(name="🎭 ROLE", value=f"`{role.upper()}`", inline=True)
-    embed.add_field(name="🌐 LOGIN URL", value=f"[Click Here to Login]({os.getenv('WEBSITE_URL', 'https://edith-bot.up.railway.app')})", inline=False)
-    embed.set_footer(text="⚠️ Keep these safe! You cannot reset your password.")
+    embed.add_field(name="🌐 LOGIN URL", value=f"[Click Here]({os.getenv('WEBSITE_URL', 'https://edith-bot.up.railway.app')})", inline=False)
+    embed.set_footer(text="⚠️ Keep these safe!")
     
     try:
         await member.send(embed=embed)
@@ -287,7 +287,7 @@ async def process_members(guild, log_channel=None):
                     creds = generate_credentials(user_id, role=role_type)
                     await send_credentials_dm(member, creds, role_type, log_channel)
                     sent_count += 1
-                    logger.info(f"🔑 Generated credentials for verified user {member.name}")
+                    logger.info(f"🔑 Generated credentials for {member.name}")
                 else:
                     current_role = creds.get('role', 'member')
                     if is_admin and current_role != 'moderator':
@@ -324,13 +324,12 @@ async def process_members(guild, log_channel=None):
                 firebase_set(f'guilds/{guild.id}/unverified/{user_id}', {
                     'discord_id': user_id,
                     'username': member.name,
-                    'joined_at': member.joined_at.isoformat() if member.joined_at else None,
-                    'roles': [r.name for r in member.roles if r.name != "@everyone"]
+                    'joined_at': member.joined_at.isoformat() if member.joined_at else None
                 })
                 firebase_delete(f'guilds/{guild.id}/verified/{user_id}')
         
         if sent_count > 0 and log_channel:
-            await log_channel.send(f"✅ **Sent {sent_count} new credentials to verified members!**")
+            await log_channel.send(f"✅ **Sent {sent_count} new credentials!**")
         
         logger.info(f"✅ Processed {len(members)} members for {guild.name}")
         return True
@@ -339,7 +338,7 @@ async def process_members(guild, log_channel=None):
         logger.error(f"Failed to process members: {e}")
         return False
 
-# ============ AUTO SYNC TASK (Every 30 seconds - reduced from 5 to avoid spam) ============
+# ============ AUTO SYNC ============
 @tasks.loop(seconds=30)
 async def auto_sync():
     try:
@@ -373,7 +372,7 @@ class SetupView(View):
             return
         await interaction.response.defer(ephemeral=True)
         try:
-            channel = await self.get_or_create_channel(interaction.guild, "🔐-verification", "🔐 Security")
+            channel = await self.create_channel(interaction.guild, "🔐-verification", "🔐 Security")
             await self.send_verification_message(channel)
             await interaction.followup.send(f"✅ Verification system setup complete!", ephemeral=True)
         except Exception as e:
@@ -386,7 +385,7 @@ class SetupView(View):
             return
         await interaction.response.defer(ephemeral=True)
         try:
-            channel = await self.get_or_create_channel(interaction.guild, "🎫-tickets", "🎫 Support")
+            channel = await self.create_channel(interaction.guild, "🎫-tickets", "🎫 Support")
             await self.send_ticket_message(channel)
             await interaction.followup.send(f"✅ Ticket system setup complete!", ephemeral=True)
         except Exception as e:
@@ -399,7 +398,7 @@ class SetupView(View):
             return
         await interaction.response.defer(ephemeral=True)
         try:
-            channel = await self.get_or_create_channel(interaction.guild, "🎉-giveaways", "🎉 Events")
+            channel = await self.create_channel(interaction.guild, "🎉-giveaways", "🎉 Events")
             await self.send_giveaway_message(channel)
             await interaction.followup.send(f"✅ Giveaway system setup complete!", ephemeral=True)
         except Exception as e:
@@ -424,7 +423,7 @@ class SetupView(View):
             return
         await interaction.response.defer(ephemeral=True)
         try:
-            channel = await self.get_or_create_channel(interaction.guild, "🛡️-mod-logs", "🔐 Security")
+            channel = await self.create_channel(interaction.guild, "🛡️-mod-logs", "🔐 Security")
             await interaction.followup.send(f"✅ Moderation setup complete!", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
@@ -464,7 +463,7 @@ class SetupView(View):
                 log_channel = discord.utils.get(interaction.guild.channels, name="🔐-verification")
             
             await process_members(interaction.guild, log_channel)
-            await interaction.followup.send("✅ **Members synced!** Credentials generated and sent!", ephemeral=True)
+            await interaction.followup.send("✅ **Members synced!**", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
     
@@ -477,17 +476,16 @@ class SetupView(View):
         embed = discord.Embed(
             title="📝 **CREDENTIALS MANAGEMENT**",
             description="""
-            **📋 AVAILABLE COMMANDS:**
-            • `/credentials` - Get your own credentials
-            • `/get_creds @user` - Get credentials for a user
-            • `/reset_creds @user` - Reset credentials for a user
+            **📋 COMMANDS:**
+            • `/credentials` - Get your credentials
+            • `/get_creds @user` - Get user's credentials
+            • `/reset_creds @user` - Reset user's credentials
             • `/sync` - Sync all members
             
             **⚡ AUTO FEATURES:**
             • 🔄 Auto-sync every 30 seconds
             • ✅ Only verified users get credentials
-            • 🗑️ Credentials auto-delete when user leaves
-            • 📝 Logged to #🛡️-mod-logs
+            • 🗑️ Credentials deleted when user leaves
             • 🛡️ Spam protection (1 per minute)
             """,
             color=discord.Color.blue()
@@ -496,37 +494,9 @@ class SetupView(View):
     
     async def setup_all(self, guild, interaction):
         try:
-            await interaction.followup.send("🔄 **STEP 1/5:** Deleting existing channels and roles...", ephemeral=True)
+            await interaction.followup.send("🔄 **STEP 1/5:** Creating server structure...", ephemeral=True)
             
-            # Delete channels
-            channel_count = 0
-            for channel in guild.channels:
-                try:
-                    await channel.delete()
-                    channel_count += 1
-                    await asyncio.sleep(0.1)  # Small delay to avoid rate limits
-                except Exception as e:
-                    logger.warning(f"Could not delete channel: {e}")
-            logger.info(f"🗑️ Deleted {channel_count} channels")
-            
-            # Delete roles
-            role_count = 0
-            for role in guild.roles:
-                if role.name != "@everyone" and not role.managed:
-                    try:
-                        await role.delete()
-                        role_count += 1
-                        await asyncio.sleep(0.1)
-                    except Exception as e:
-                        logger.warning(f"Could not delete role: {e}")
-            logger.info(f"🗑️ Deleted {role_count} roles")
-            
-            # CRITICAL: Wait for Discord to process deletions
-            await asyncio.sleep(3)
-            
-            await interaction.followup.send("🔄 **STEP 2/5:** Creating new server structure...", ephemeral=True)
-            
-            # Create categories and channels
+            # Create categories and channels FIRST (don't delete existing ones)
             categories = {
                 "📋 INFORMATION": ["📌-rules", "📢-announcements", "📋-server-info"],
                 "🔐 SECURITY": ["🔐-verification", "🛡️-mod-logs", "📊-logs"],
@@ -540,11 +510,18 @@ class SetupView(View):
             category_objects = {}
             created_count = 0
             
+            # Check if channels already exist - if yes, skip creation
+            existing_verify = discord.utils.get(guild.channels, name="🔐-verification")
+            if existing_verify:
+                await interaction.followup.send("ℹ️ **Server already has channels! Skipping creation.**", ephemeral=True)
+                return
+            
             for category_name, channel_names in categories.items():
                 try:
                     category = await guild.create_category(category_name)
                     category_objects[category_name] = category
                     logger.info(f"✅ Created category: {category_name}")
+                    await asyncio.sleep(0.5)
                 except Exception as e:
                     logger.error(f"❌ Failed to create category {category_name}: {e}")
                     continue
@@ -554,7 +531,7 @@ class SetupView(View):
                         await guild.create_text_channel(channel_name, category=category)
                         created_count += 1
                         logger.info(f"✅ Created channel: {channel_name}")
-                        await asyncio.sleep(0.2)  # Small delay between channel creation
+                        await asyncio.sleep(0.3)
                     except Exception as e:
                         logger.error(f"❌ Failed to create {channel_name}: {e}")
             
@@ -565,13 +542,13 @@ class SetupView(View):
                         await guild.create_voice_channel(vc_name, category=category_objects["📞 VOICE"])
                         created_count += 1
                         logger.info(f"✅ Created voice channel: {vc_name}")
-                        await asyncio.sleep(0.2)
+                        await asyncio.sleep(0.3)
                     except Exception as e:
                         logger.error(f"❌ Failed to create {vc_name}: {e}")
             
             logger.info(f"✅ Created {created_count} channels")
             
-            await interaction.followup.send("🔄 **STEP 3/5:** Creating roles...", ephemeral=True)
+            await interaction.followup.send("🔄 **STEP 2/5:** Creating roles...", ephemeral=True)
             
             # Create roles
             roles_config = {
@@ -592,32 +569,44 @@ class SetupView(View):
                     await guild.create_role(name=role_name, permissions=perms)
                     role_count += 1
                     logger.info(f"✅ Created role: {role_name}")
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.3)
                 except Exception as e:
                     logger.error(f"❌ Failed to create {role_name}: {e}")
             
             logger.info(f"✅ Created {role_count} roles")
             
-            await interaction.followup.send("🔄 **STEP 4/5:** Setting up systems...", ephemeral=True)
+            await interaction.followup.send("🔄 **STEP 3/5:** Setting up systems...", ephemeral=True)
             
-            # Get channels and send messages
+            # Get channels - wait a moment for Discord to register them
+            await asyncio.sleep(2)
+            
             verify_channel = discord.utils.get(guild.channels, name="🔐-verification")
             ticket_channel = discord.utils.get(guild.channels, name="🎫-tickets")
             giveaway_channel = discord.utils.get(guild.channels, name="🎉-giveaways")
+            mod_channel = discord.utils.get(guild.channels, name="🛡️-mod-logs")
             
+            # Send messages only if channels exist
             if verify_channel:
                 await self.send_verification_message(verify_channel)
                 logger.info("✅ Sent verification message")
+            else:
+                logger.warning("⚠️ Verification channel not found!")
+            
             if ticket_channel:
                 await self.send_ticket_message(ticket_channel)
                 logger.info("✅ Sent ticket message")
+            else:
+                logger.warning("⚠️ Ticket channel not found!")
+            
             if giveaway_channel:
                 await self.send_giveaway_message(giveaway_channel)
                 logger.info("✅ Sent giveaway message")
+            else:
+                logger.warning("⚠️ Giveaway channel not found!")
             
-            await interaction.followup.send("🔄 **STEP 5/5:** Syncing members...", ephemeral=True)
+            await interaction.followup.send("🔄 **STEP 4/5:** Syncing members...", ephemeral=True)
             
-            log_channel = discord.utils.get(guild.channels, name="🛡️-mod-logs")
+            log_channel = mod_channel or discord.utils.get(guild.channels, name="🔐-verification")
             await process_members(guild, log_channel)
             
             embed = discord.Embed(
@@ -627,16 +616,12 @@ class SetupView(View):
                 
                 **✅ CREATED:**
                 • 📋 7 Categories
-                • 💬 27+ Channels  
-                • 👑 9 Roles
-                • 🔐 Verification System
-                • 🎫 Ticket System
-                • 🎁 Giveaway System
+                • 💬 {created_count} Channels  
+                • 👑 {role_count} Roles
                 
                 **🔑 CREDENTIALS:**
                 • ✅ Verified members processed
                 • 📧 Credentials sent via DM
-                • 📝 Logged in #🛡️-mod-logs
                 • 🔄 Auto-sync every 30 seconds
                 
                 🎉 **Your server is ready!**
@@ -655,16 +640,20 @@ class SetupView(View):
             except:
                 pass
     
-    async def get_or_create_channel(self, guild, channel_name, category_name):
-        channel = discord.utils.get(guild.channels, name=channel_name)
-        if channel:
-            return channel
+    async def create_channel(self, guild, channel_name, category_name):
+        """Create a channel if it doesn't exist"""
+        existing = discord.utils.get(guild.channels, name=channel_name)
+        if existing:
+            return existing
         
         category = discord.utils.get(guild.categories, name=category_name)
         if not category:
             category = await guild.create_category(category_name)
+            await asyncio.sleep(0.5)
         
-        return await guild.create_text_channel(channel_name, category=category)
+        channel = await guild.create_text_channel(channel_name, category=category)
+        await asyncio.sleep(0.5)
+        return channel
     
     async def create_roles(self, guild):
         roles_config = {
@@ -683,13 +672,11 @@ class SetupView(View):
             if not discord.utils.get(guild.roles, name=role_name):
                 try:
                     await guild.create_role(name=role_name, permissions=perms)
+                    await asyncio.sleep(0.3)
                 except:
                     pass
     
     async def send_verification_message(self, channel):
-        if not channel:
-            return
-        
         embed = discord.Embed(
             title="🔐 **VERIFICATION REQUIRED**",
             description="""
@@ -697,7 +684,6 @@ class SetupView(View):
             • 🛡️ **SECURITY** - Protect your account
             • 🎮 **ACCESS** - Unlock full server features
             • 👤 **IDENTITY** - Verify your Discord identity
-            • 🏆 **BENEFITS** - Get exclusive content
             
             **✅ HOW TO VERIFY:**
             1. Click the button below
@@ -712,9 +698,6 @@ class SetupView(View):
         await channel.send(embed=embed, view=view)
     
     async def send_ticket_message(self, channel):
-        if not channel:
-            return
-        
         embed = discord.Embed(
             title="🎫 **TICKET SYSTEM**",
             description="Click a button below to create a ticket!",
@@ -724,9 +707,6 @@ class SetupView(View):
         await channel.send(embed=embed, view=view)
     
     async def send_giveaway_message(self, channel):
-        if not channel:
-            return
-        
         embed = discord.Embed(
             title="🎉 **GIVEAWAY CENTER**",
             description="👑 Admin only: Host exciting giveaways!",
@@ -1087,7 +1067,7 @@ async def slash_setup(interaction: discord.Interaction):
         description="""
         **Click any button below to set up that system!**
         
-        **⚠️ WARNING:** Setup All will delete ALL existing channels and roles!
+        **⚠️ WARNING:** This will create new channels and roles!
         """,
         color=discord.Color.gold()
     )
