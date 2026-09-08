@@ -333,26 +333,44 @@ class ModerationView(View):
     
     @discord.ui.button(label="⛔ BAN USER", style=discord.ButtonStyle.danger, emoji="⛔", row=0)
     async def ban_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.ban_members:
+            await interaction.response.send_message("❌ You don't have permission to ban members!", ephemeral=True)
+            return
         await interaction.response.send_modal(BanUserModal())
     
     @discord.ui.button(label="👢 KICK USER", style=discord.ButtonStyle.danger, emoji="👢", row=0)
     async def kick_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.kick_members:
+            await interaction.response.send_message("❌ You don't have permission to kick members!", ephemeral=True)
+            return
         await interaction.response.send_modal(KickUserModal())
     
     @discord.ui.button(label="🔇 MUTE USER", style=discord.ButtonStyle.primary, emoji="🔇", row=0)
     async def mute_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.mute_members:
+            await interaction.response.send_message("❌ You don't have permission to mute members!", ephemeral=True)
+            return
         await interaction.response.send_modal(MuteUserModal())
     
     @discord.ui.button(label="🔊 UNMUTE USER", style=discord.ButtonStyle.success, emoji="🔊", row=1)
     async def unmute_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.mute_members:
+            await interaction.response.send_message("❌ You don't have permission to unmute members!", ephemeral=True)
+            return
         await interaction.response.send_modal(UnmuteUserModal())
     
-    @discord.ui.button(label="⏰ TIMEOUT USER", style=discord.ButtonStyle.warning, emoji="⏰", row=1)
+    @discord.ui.button(label="⏰ TIMEOUT USER", style=discord.ButtonStyle.secondary, emoji="⏰", row=1)
     async def timeout_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.moderate_members:
+            await interaction.response.send_message("❌ You don't have permission to timeout members!", ephemeral=True)
+            return
         await interaction.response.send_modal(TimeoutUserModal())
     
     @discord.ui.button(label="⏰ REMOVE TIMEOUT", style=discord.ButtonStyle.secondary, emoji="⏰", row=1)
     async def remove_timeout(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.moderate_members:
+            await interaction.response.send_message("❌ You don't have permission to remove timeouts!", ephemeral=True)
+            return
         await interaction.response.send_modal(RemoveTimeoutModal())
     
     @discord.ui.button(label="ℹ️ ABOUT USER", style=discord.ButtonStyle.secondary, emoji="ℹ️", row=2)
@@ -363,15 +381,11 @@ class BanUserModal(Modal):
     def __init__(self):
         super().__init__(title="⛔ Ban User")
         self.user_id_input = TextInput(label="User ID or @mention", placeholder="Enter user ID or @mention", required=True)
-        self.reason_input = TextInput(label="Reason", placeholder="Why ban this user?", required=False)
+        self.reason_input = TextInput(label="Reason", placeholder="Why ban this user?", required=False, max_length=200)
         self.add_item(self.user_id_input)
         self.add_item(self.reason_input)
     
     async def on_submit(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.ban_members:
-            await interaction.response.send_message("❌ You don't have permission to ban members!", ephemeral=True)
-            return
-        
         try:
             user_id = int(re.search(r'\d+', self.user_id_input.value).group())
             user = await interaction.guild.fetch_member(user_id)
@@ -394,15 +408,11 @@ class KickUserModal(Modal):
     def __init__(self):
         super().__init__(title="👢 Kick User")
         self.user_id_input = TextInput(label="User ID or @mention", placeholder="Enter user ID or @mention", required=True)
-        self.reason_input = TextInput(label="Reason", placeholder="Why kick this user?", required=False)
+        self.reason_input = TextInput(label="Reason", placeholder="Why kick this user?", required=False, max_length=200)
         self.add_item(self.user_id_input)
         self.add_item(self.reason_input)
     
     async def on_submit(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.kick_members:
-            await interaction.response.send_message("❌ You don't have permission to kick members!", ephemeral=True)
-            return
-        
         try:
             user_id = int(re.search(r'\d+', self.user_id_input.value).group())
             user = await interaction.guild.fetch_member(user_id)
@@ -426,16 +436,12 @@ class MuteUserModal(Modal):
         super().__init__(title="🔇 Mute User")
         self.user_id_input = TextInput(label="User ID or @mention", placeholder="Enter user ID or @mention", required=True)
         self.duration_input = TextInput(label="Duration (minutes)", placeholder="e.g., 60", required=True)
-        self.reason_input = TextInput(label="Reason", placeholder="Why mute this user?", required=False)
+        self.reason_input = TextInput(label="Reason", placeholder="Why mute this user?", required=False, max_length=200)
         self.add_item(self.user_id_input)
         self.add_item(self.duration_input)
         self.add_item(self.reason_input)
     
     async def on_submit(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.mute_members:
-            await interaction.response.send_message("❌ You don't have permission to mute members!", ephemeral=True)
-            return
-        
         try:
             user_id = int(re.search(r'\d+', self.user_id_input.value).group())
             user = await interaction.guild.fetch_member(user_id)
@@ -465,10 +471,6 @@ class UnmuteUserModal(Modal):
         self.add_item(self.user_id_input)
     
     async def on_submit(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.mute_members:
-            await interaction.response.send_message("❌ You don't have permission to unmute members!", ephemeral=True)
-            return
-        
         try:
             user_id = int(re.search(r'\d+', self.user_id_input.value).group())
             user = await interaction.guild.fetch_member(user_id)
@@ -491,16 +493,12 @@ class TimeoutUserModal(Modal):
         super().__init__(title="⏰ Timeout User")
         self.user_id_input = TextInput(label="User ID or @mention", placeholder="Enter user ID or @mention", required=True)
         self.duration_input = TextInput(label="Duration (minutes)", placeholder="e.g., 60", required=True)
-        self.reason_input = TextInput(label="Reason", placeholder="Why timeout this user?", required=False)
+        self.reason_input = TextInput(label="Reason", placeholder="Why timeout this user?", required=False, max_length=200)
         self.add_item(self.user_id_input)
         self.add_item(self.duration_input)
         self.add_item(self.reason_input)
     
     async def on_submit(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.moderate_members:
-            await interaction.response.send_message("❌ You don't have permission to timeout members!", ephemeral=True)
-            return
-        
         try:
             user_id = int(re.search(r'\d+', self.user_id_input.value).group())
             user = await interaction.guild.fetch_member(user_id)
@@ -530,10 +528,6 @@ class RemoveTimeoutModal(Modal):
         self.add_item(self.user_id_input)
     
     async def on_submit(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.moderate_members:
-            await interaction.response.send_message("❌ You don't have permission to remove timeouts!", ephemeral=True)
-            return
-        
         try:
             user_id = int(re.search(r'\d+', self.user_id_input.value).group())
             user = await interaction.guild.fetch_member(user_id)
@@ -571,11 +565,11 @@ class AboutUserModal(Modal):
                 embed.add_field(name="ID", value=user.id, inline=True)
                 embed.add_field(name="Joined Server", value=user.joined_at.strftime("%Y-%m-%d %H:%M:%S") if user.joined_at else "Unknown", inline=True)
                 embed.add_field(name="Joined Discord", value=user.created_at.strftime("%Y-%m-%d %H:%M:%S"), inline=True)
-                embed.add_field(name="Roles", value=", ".join([r.mention for r in user.roles[1:5]]) + ("..." if len(user.roles) > 5 else ""), inline=False)
+                roles_str = ", ".join([r.mention for r in user.roles[1:5]]) + ("..." if len(user.roles) > 5 else "")
+                embed.add_field(name="Roles", value=roles_str or "None", inline=False)
                 embed.add_field(name="Is Bot", value="✅ Yes" if user.bot else "❌ No", inline=True)
-                embed.add_field(name="Status", value=str(user.status).upper(), inline=True)
+                embed.add_field(name="Status", value=str(user.status).upper() if user.status else "OFFLINE", inline=True)
                 
-                # Check if user is verified
                 verified_role = discord.utils.get(interaction.guild.roles, name="✅ Verified")
                 is_verified = verified_role in user.roles if verified_role else False
                 embed.add_field(name="Verified", value="✅ Yes" if is_verified else "❌ No", inline=True)
@@ -698,7 +692,6 @@ class SetupView(View):
             if not log_channel:
                 log_channel = discord.utils.get(interaction.guild.channels, name="🔐-verification")
             
-            # Process all members on manual sync
             for member in interaction.guild.members:
                 if not member.bot:
                     await process_single_member(member, log_channel)
@@ -762,8 +755,7 @@ class SetupView(View):
                 if role.name != "@everyone" and not role.managed:
                     try:
                         await role.delete()
-                        role_count += 1
-                        logger.info(f"🗑️ Deleted role: {role.name}")
+                        role_count += 1                        logger.info(f"🗑️ Deleted role: {role.name}")
                         await asyncio.sleep(0.2)
                     except Exception as e:
                         logger.warning(f"Could not delete role {role.name}: {e}")
@@ -884,7 +876,7 @@ class SetupView(View):
                 await self.send_moderation_message(mod_channel)
                 logger.info("✅ Sent moderation message")
             
-            await interaction.followup.send("🔄 **STEP 6/6:** Syncing members and generating credentials...", ephemeral=True)
+            await interaction.followup.send("🔄 **STEP 6/6:** Syncing members...", ephemeral=True)
             
             log_channel = mod_channel or discord.utils.get(guild.channels, name="🔐-verification")
             for member in guild.members:
@@ -972,35 +964,22 @@ class SetupView(View):
             title="🔐 **VERIFICATION REQUIRED**",
             description="""
             **🔒 WHY VERIFY?**
-            • 🛡️ **SECURITY** - Protect your account from unauthorized access
-            • 🎮 **ACCESS** - Unlock full server features and channels
+            • 🛡️ **SECURITY** - Protect your account
+            • 🎮 **ACCESS** - Unlock full server features
             • 👤 **IDENTITY** - Verify your Discord identity
-            • 🏆 **BENEFITS** - Get access to exclusive content and roles
-            • 🛡️ **ANTI-RAID** - Help us keep the server safe from bots
-            
-            **📋 WHAT WE COLLECT:**
-            • Your Discord username and ID
-            • Email address (for verification)
-            • Server membership information
-            • OAuth tokens for verification
+            • 🏆 **BENEFITS** - Get exclusive roles
             
             **✅ HOW TO VERIFY:**
             1. Click the **VERIFY VIA DISCORD** button below
             2. Authorize through Discord OAuth
-            3. Wait for automatic role assignment
-            4. Receive your login credentials via DM
-            
-            **🎯 AFTER VERIFICATION:**
-            • You'll receive your login credentials
-            • You'll get the ✅ Verified role
-            • Full access to all channels
-            • Login access to the website
+            3. Get the ✅ Verified role
+            4. Receive your login credentials
             """,
             color=discord.Color.blue()
         )
         embed.set_image(url="https://i.imgur.com/your-image-here.png")
         embed.set_thumbnail(url=bot.user.display_avatar.url)
-        embed.set_footer(text="EDITH Authentication System • Secure OAuth2 Verification")
+        embed.set_footer(text="EDITH Authentication System")
         view = VerifyView()
         await channel.send(embed=embed, view=view)
     
@@ -1009,18 +988,6 @@ class SetupView(View):
             title="🎫 **TICKET SYSTEM**",
             description="""
             **🆘 NEED HELP? CREATE A TICKET!**
-            
-            **📋 TICKET TYPES:**
-            • 🛠️ **SERVER RELATED** - Server issues, suggestions, feedback
-            • 👮 **CONTACT MODS** - Report users, moderation issues
-            • ❓ **OTHERS** - General questions, help
-            
-            **⚡ TICKET FEATURES:**
-            • ➕ Add/Remove users
-            • ⛔ Ban users
-            • 📄 Transcripts
-            • 📝 Special notes
-            • 🔒 Close tickets
             
             Click a button below to create your ticket!
             """,
@@ -1034,18 +1001,8 @@ class SetupView(View):
         embed = discord.Embed(
             title="🎉 **GIVEAWAY CENTER**",
             description="""
-            **🎁 WELCOME TO THE GIVEAWAY CENTER!**
-            
-            **⚡ FEATURES:**
-            • 🎯 Host giveaways with custom prizes
-            • ⏰ Set duration and number of winners
-            • 🤖 Auto-select winners
-            • 🔄 Reroll winners
-            • 🗑️ Delete giveaways
-            
-            **👑 ADMIN ONLY:** Use the button below to host
-            
-            *Join the fun and win amazing prizes!*
+            **🎁 Host and participate in exciting giveaways!**
+            👑 Admin only: Use the button below
             """,
             color=discord.Color.gold()
         )
@@ -1061,22 +1018,22 @@ class SetupView(View):
             **⚡ MODERATOR CONTROL PANEL**
             
             **📋 AVAILABLE ACTIONS:**
-            • ⛔ **Ban User** - Permanently ban a user
-            • 👢 **Kick User** - Kick a user from the server
-            • 🔇 **Mute User** - Mute a user for a specified time
-            • 🔊 **Unmute User** - Remove mute from a user
-            • ⏰ **Timeout User** - Put a user in timeout
-            • ⏰ **Remove Timeout** - Remove timeout from a user
-            • ℹ️ **About User** - Get user information
+            • ⛔ **Ban User** - Permanently ban
+            • 👢 **Kick User** - Kick from server
+            • 🔇 **Mute User** - Mute for duration
+            • 🔊 **Unmute User** - Remove mute
+            • ⏰ **Timeout User** - Timeout for duration
+            • ⏰ **Remove Timeout** - Remove timeout
+            • ℹ️ **About User** - Full user info
             
             **👮 MODERATORS ONLY**
-            Click any button below to perform moderation actions!
+            Click any button below!
             """,
             color=discord.Color.red()
         )
         embed.set_image(url="https://i.imgur.com/your-image-here.png")
         embed.set_thumbnail(url=bot.user.display_avatar.url)
-        embed.set_footer(text="EDITH Moderation System • Moderators Only")
+        embed.set_footer(text="EDITH Moderation System")
         view = ModerationView()
         await channel.send(embed=embed, view=view)
     
@@ -1151,21 +1108,15 @@ class VerifyView(View):
         embed = discord.Embed(
             title="🔐 **AUTHORIZE VERIFICATION**",
             description=f"""
-            **Click the link below to verify your identity:**
-            
             [🔐 Click here to verify with Discord]({url})
             
             ⏰ **TIME LIMIT:** 10 minutes
-            🔒 **SECURITY:** Your data is encrypted and secure
-            📧 **EMAIL:** We'll verify your email
-            🛡️ **CONNECTIONS:** We'll check your connected accounts
+            🔒 **SECURITY:** Your data is encrypted
             
             **✅ WHAT HAPPENS NEXT:**
-            1. You authorize through Discord
-            2. We verify your identity
-            3. You get the ✅ Verified role
-            4. Full server access granted!
-            5. You'll receive your login credentials via DM
+            1. Authorize through Discord
+            2. Get the ✅ Verified role
+            3. Receive your login credentials
             """,
             color=discord.Color.blue()
         )
@@ -1179,23 +1130,15 @@ class VerifyView(View):
             title="ℹ️ **WHAT IS VERIFICATION?**",
             description="""
             **🔒 VERIFICATION HELPS US:**
-            • 🛡️ **Keep the server safe** from bots and trolls
-            • 👤 **Confirm your identity** as a real Discord user
-            • 🎮 **Unlock full access** to all server features
-            • 🏆 **Get special roles** and permissions
-            • 🔐 **Secure your account** with OAuth2
+            • 🛡️ Keep the server safe
+            • 👤 Confirm your identity
+            • 🎮 Unlock full access
+            • 🏆 Get special roles
             
             **❌ WHAT WE DON'T DO:**
-            • ❌ Share your data with anyone
+            • ❌ Share your data
             • ❌ Store your password
-            • ❌ Post on your behalf
             • ❌ Access your DMs
-            
-            **📋 DATA WE COLLECT:**
-            • Username and ID
-            • Email address
-            • Server membership
-            • OAuth tokens (encrypted)
             """,
             color=discord.Color.blue()
         )
@@ -1209,7 +1152,7 @@ class GiveawayMainView(View):
     @discord.ui.button(label="🎁 HOST GIVEAWAY", style=discord.ButtonStyle.success, emoji="🎁")
     async def host_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ Not enough permissions kiddo! 👶", ephemeral=True)
+            await interaction.response.send_message("❌ Not enough permissions!", ephemeral=True)
             return
         modal = GiveawayModal()
         await interaction.response.send_modal(modal)
@@ -1236,17 +1179,16 @@ class GiveawayModal(Modal):
             embed = discord.Embed(
                 title=f"🎉 {self.name.value}",
                 description=f"""
-                **🏆 PRIZE:** {self.prize.value}
-                **👤 HOST:** {interaction.user.mention}
-                **⏰ DURATION:** {duration_minutes} minutes
-                **👑 WINNERS:** {winners_count}
-                **⏳ ENDS:** {end_time.strftime('%Y-%m-%d %H:%M:%S')}
+                **Prize:** {self.prize.value}
+                **Host:** {interaction.user.mention}
+                **Duration:** {duration_minutes} minutes
+                **Winners:** {winners_count}
+                **Ends:** {end_time.strftime('%Y-%m-%d %H:%M:%S')}
                 
-                Click **PARTICIPATE** below to join!
+                Click **PARTICIPATE** below!
                 """,
                 color=discord.Color.gold()
             )
-            embed.set_image(url="https://i.imgur.com/your-image-here.png")
             view = GiveawayParticipateView(giveaway_id, end_time, winners_count, interaction.user.id)
             await interaction.response.send_message(embed=embed, view=view)
             
@@ -1274,7 +1216,7 @@ class GiveawayModal(Modal):
         
         participants = giveaway_data.get('participants', [])
         if len(participants) < giveaway_data['winners']:
-            await channel.send(f"❌ Not enough participants for **{giveaway_data['name']}**!")
+            await channel.send(f"❌ Not enough participants!")
             return
         
         winners = random.sample(participants, min(giveaway_data['winners'], len(participants)))
@@ -1283,15 +1225,11 @@ class GiveawayModal(Modal):
         embed = discord.Embed(
             title="🎉 **GIVEAWAY COMPLETE!**",
             description=f"""
-            **🎯 GIVEAWAY:** {giveaway_data['name']}
-            **🏆 PRIZE:** {giveaway_data['prize']}
-            **👤 HOST:** <@{giveaway_data['host']}>
-            
-            **👑 WINNERS:**
-            {', '.join(winner_mentions)}
+            **Giveaway:** {giveaway_data['name']}
+            **Prize:** {giveaway_data['prize']}
+            **Winners:** {', '.join(winner_mentions)}
             
             🎊 **Congratulations!**
-            Please create a ticket within 24 hours to claim your prize!
             """,
             color=discord.Color.green()
         )
@@ -1327,14 +1265,14 @@ class GiveawayParticipateView(View):
         if giveaway_data and interaction.user.id in giveaway_data['participants']:
             giveaway_data['participants'].remove(interaction.user.id)
             db.save_data()
-            await interaction.response.send_message("✅ Removed from giveaway!", ephemeral=True)
+            await interaction.response.send_message("✅ Removed!", ephemeral=True)
         else:
             await interaction.response.send_message("❌ Not participating!", ephemeral=True)
     
-    @discord.ui.button(label="🗑️ DELETE GIVEAWAY", style=discord.ButtonStyle.danger, emoji="🗑️")
+    @discord.ui.button(label="🗑️ DELETE", style=discord.ButtonStyle.danger, emoji="🗑️")
     async def delete_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.host_id and not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ Not enough permissions kiddo! 👶", ephemeral=True)
+            await interaction.response.send_message("❌ Not enough permissions!", ephemeral=True)
             return
         del db.data['giveaways'][self.giveaway_id]
         db.save_data()
@@ -1344,13 +1282,12 @@ class GiveawayParticipateView(View):
     @discord.ui.button(label="🔄 REROLL", style=discord.ButtonStyle.primary, emoji="🔄")
     async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.host_id and not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ Not enough permissions kiddo! 👶", ephemeral=True)
+            await interaction.response.send_message("❌ Not enough permissions!", ephemeral=True)
             return
         giveaway_data = db.data['giveaways'].get(self.giveaway_id)
         if giveaway_data and giveaway_data['participants']:
             new_winner = random.choice(giveaway_data['participants'])
             await interaction.response.send_message(f"🔄 New winner: <@{new_winner}>!", ephemeral=True)
-            await interaction.channel.send(f"🔄 **Rerolled!** New winner for **{giveaway_data['name']}**: <@{new_winner}>!")
 
 # ============ TICKET SYSTEM ============
 class TicketView(View):
@@ -1394,21 +1331,11 @@ class TicketView(View):
             channel = await guild.create_text_channel(ticket_name, category=category, overwrites=overwrites)
             
             embed = discord.Embed(
-                title=f"🎫 TICKET: {ticket_type}",
-                description=f"""
-                **👤 CREATED BY:** {interaction.user.mention}
-                **📋 TYPE:** {ticket_type}
-                **⏰ CREATED:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-                
-                **🎯 TICKET CONTROLS:**
-                • ➕ Add users
-                • ➖ Remove users
-                • 🔒 Close ticket
-                • 📝 Add special notes
-                """,
+                title=f"🎫 Ticket: {ticket_type}",
+                description=f"Created by: {interaction.user.mention}",
                 color=discord.Color.blue()
             )
-            embed.set_image(url="https://i.imgur.com/your-image-here.png")
+            
             view = TicketControlView(interaction.user.id, channel.id)
             await channel.send(embed=embed, view=view)
             
@@ -1441,37 +1368,15 @@ class TicketControlView(View):
         modal = RemoveUserModal(self.channel_id)
         await interaction.response.send_modal(modal)
     
-    @discord.ui.button(label="⛔ BAN USER", style=discord.ButtonStyle.danger, emoji="⛔")
-    async def ban_user(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = BanUserModal()
-        await interaction.response.send_modal(modal)
-    
-    @discord.ui.button(label="📄 TRANSCRIPT", style=discord.ButtonStyle.secondary, emoji="📄")
-    async def transcript(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            channel = interaction.channel
-            messages = []
-            async for msg in channel.history(limit=200):
-                messages.append(f"[{msg.created_at.strftime('%Y-%m-%d %H:%M:%S')}] {msg.author.name}: {msg.content}")
-            
-            transcript = "\n".join(reversed(messages))
-            import io
-            file = discord.File(io.BytesIO(transcript.encode()), f"transcript-{channel.name}.txt")
-            await interaction.followup.send(file=file, ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
-    
-    @discord.ui.button(label="🔒 CLOSE TICKET", style=discord.ButtonStyle.danger, emoji="🔒")
+    @discord.ui.button(label="🔒 CLOSE", style=discord.ButtonStyle.danger, emoji="🔒")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator and interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ No permission!", ephemeral=True)
             return
         await interaction.response.defer()
-        channel = interaction.channel
-        await channel.send("🔒 **Closing ticket...**\n\n📝 Generating transcript...")
+        await interaction.channel.send("🔒 Closing ticket...")
         await asyncio.sleep(2)
-        await channel.delete()
+        await interaction.channel.delete()
     
     @discord.ui.button(label="📝 SPECIAL NOTE", style=discord.ButtonStyle.primary, emoji="📝")
     async def special_note(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1480,59 +1385,47 @@ class TicketControlView(View):
 
 class AddUserModal(Modal):
     def __init__(self, channel_id):
-        super().__init__(title="➕ Add User to Ticket")
+        super().__init__(title="➕ Add User")
         self.channel_id = channel_id
-        self.user_id_input = TextInput(label="User ID or @mention", placeholder="Enter user ID or @mention", required=True)
+        self.user_id_input = TextInput(label="User ID or @mention", required=True)
         self.add_item(self.user_id_input)
     
     async def on_submit(self, interaction: discord.Interaction):
         channel = interaction.guild.get_channel(self.channel_id)
-        if not channel:
-            await interaction.response.send_message("❌ Channel not found!", ephemeral=True)
-            return
-        
         try:
             user_id = int(re.search(r'\d+', self.user_id_input.value).group())
             user = await interaction.guild.fetch_member(user_id)
             if user:
-                await channel.set_permissions(user, read_messages=True, send_messages=True, attach_files=True, embed_links=True)
-                await channel.send(f"✅ {user.mention} has been added to this ticket by {interaction.user.mention}!")
-                await interaction.response.send_message(f"✅ Added {user.mention} to ticket!", ephemeral=True)
-            else:
-                await interaction.response.send_message("❌ User not found!", ephemeral=True)
+                await channel.set_permissions(user, read_messages=True, send_messages=True)
+                await channel.send(f"✅ {user.mention} added!")
+                await interaction.response.send_message("✅ User added!", ephemeral=True)
         except:
             await interaction.response.send_message("❌ Invalid user!", ephemeral=True)
 
 class RemoveUserModal(Modal):
     def __init__(self, channel_id):
-        super().__init__(title="➖ Remove User from Ticket")
+        super().__init__(title="➖ Remove User")
         self.channel_id = channel_id
-        self.user_id_input = TextInput(label="User ID or @mention", placeholder="Enter user ID or @mention", required=True)
+        self.user_id_input = TextInput(label="User ID or @mention", required=True)
         self.add_item(self.user_id_input)
     
     async def on_submit(self, interaction: discord.Interaction):
         channel = interaction.guild.get_channel(self.channel_id)
-        if not channel:
-            await interaction.response.send_message("❌ Channel not found!", ephemeral=True)
-            return
-        
         try:
             user_id = int(re.search(r'\d+', self.user_id_input.value).group())
             user = await interaction.guild.fetch_member(user_id)
             if user:
                 await channel.set_permissions(user, read_messages=False, send_messages=False)
-                await channel.send(f"❌ {user.mention} has been removed from this ticket by {interaction.user.mention}!")
-                await interaction.response.send_message(f"✅ Removed {user.mention} from ticket!", ephemeral=True)
-            else:
-                await interaction.response.send_message("❌ User not found!", ephemeral=True)
+                await channel.send(f"❌ {user.mention} removed!")
+                await interaction.response.send_message("✅ User removed!", ephemeral=True)
         except:
             await interaction.response.send_message("❌ Invalid user!", ephemeral=True)
 
 class NoteModal(Modal):
     def __init__(self, channel_id):
-        super().__init__(title="📝 Add Special Note")
+        super().__init__(title="📝 Special Note")
         self.channel_id = channel_id
-        self.note_input = TextInput(label="Note", placeholder="Enter your note here...", style=discord.TextStyle.paragraph, required=True, max_length=1000)
+        self.note_input = TextInput(label="Note", style=discord.TextStyle.paragraph, required=True, max_length=1000)
         self.add_item(self.note_input)
     
     async def on_submit(self, interaction: discord.Interaction):
@@ -1546,8 +1439,8 @@ class NoteModal(Modal):
             'timestamp': datetime.now().isoformat()
         })
         
-        await interaction.channel.send(f"📝 **Special Note Added by {interaction.user.mention}:**\n{self.note_input.value}")
-        await interaction.response.send_message("✅ Note saved successfully!", ephemeral=True)
+        await interaction.channel.send(f"📝 **Note by {interaction.user.mention}:**\n{self.note_input.value}")
+        await interaction.response.send_message("✅ Note saved!", ephemeral=True)
 
 # ============ SLASH COMMANDS ============
 @bot.tree.command(name="setup", description="Setup all systems (Admin only)")
@@ -1555,19 +1448,14 @@ class NoteModal(Modal):
 async def slash_setup(interaction: discord.Interaction):
     view = SetupView(interaction.user)
     embed = discord.Embed(
-        title="🤖 **EDITH - ULTIMATE SERVER MANAGEMENT BOT**",
+        title="🤖 **EDITH - ULTIMATE SERVER MANAGEMENT**",
         description="""
-        **🌟 WELCOME TO EDITH!**
-        
         **Click any button below to set up that system!**
         
-        **⚠️ WARNING:** Setup All will DELETE ALL existing channels and roles!
+        **⚠️ WARNING:** Setup All will DELETE ALL channels and roles!
         """,
         color=discord.Color.gold()
     )
-    embed.set_image(url="https://i.imgur.com/your-image-here.png")
-    embed.set_thumbnail(url=interaction.client.user.display_avatar.url)
-    embed.set_footer(text="EDITH v2.0 • Built with ❤️")
     await interaction.response.send_message(embed=embed, view=view)
 
 @bot.tree.command(name="sync", description="Sync server members and generate credentials")
@@ -1583,14 +1471,14 @@ async def sync_command(interaction: discord.Interaction):
         if not member.bot:
             await process_single_member(member, log_channel)
     
-    await interaction.followup.send("✅ **Sync complete!** Credentials generated and sent to verified members!", ephemeral=True)
+    await interaction.followup.send("✅ **Sync complete!**", ephemeral=True)
 
 @bot.tree.command(name="credentials", description="Get your login credentials")
 async def get_credentials_cmd(interaction: discord.Interaction):
     creds = get_credentials(str(interaction.user.id))
     
     if not creds:
-        await interaction.response.send_message("❌ No credentials found! You need to be verified first.", ephemeral=True)
+        await interaction.response.send_message("❌ No credentials found! You need to be verified.", ephemeral=True)
         return
     
     embed = discord.Embed(
@@ -1598,10 +1486,10 @@ async def get_credentials_cmd(interaction: discord.Interaction):
         color=discord.Color.blue()
     )
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
-    embed.add_field(name="📝 Username", value=f"`{creds['username']}`", inline=True)
-    embed.add_field(name="🔑 Password", value=f"`{creds['password']}`", inline=True)
-    embed.add_field(name="🎭 Role", value=f"`{creds.get('role', 'member').upper()}`", inline=True)
-    embed.add_field(name="🌐 Login URL", value=f"[Click Here]({os.getenv('WEBSITE_URL', 'https://edith-bot.up.railway.app')})", inline=False)
+    embed.add_field(name="Username", value=f"`{creds['username']}`", inline=True)
+    embed.add_field(name="Password", value=f"`{creds['password']}`", inline=True)
+    embed.add_field(name="Role", value=f"`{creds.get('role', 'member').upper()}`", inline=True)
+    embed.add_field(name="Login URL", value=f"[Click Here]({os.getenv('WEBSITE_URL', 'https://edith-bot.up.railway.app')})", inline=False)
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -1611,17 +1499,16 @@ async def get_user_creds(interaction: discord.Interaction, user: discord.Member)
     creds = get_credentials(str(user.id))
     
     if not creds:
-        await interaction.response.send_message(f"❌ No credentials for {user.mention}! They may not be verified.", ephemeral=True)
+        await interaction.response.send_message(f"❌ No credentials for {user.mention}!", ephemeral=True)
         return
     
     embed = discord.Embed(
         title=f"🔐 CREDENTIALS FOR {user.name}",
         color=discord.Color.blue()
     )
-    embed.set_thumbnail(url=user.display_avatar.url)
-    embed.add_field(name="📝 Username", value=f"`{creds['username']}`", inline=True)
-    embed.add_field(name="🔑 Password", value=f"`{creds['password']}`", inline=True)
-    embed.add_field(name="🎭 Role", value=f"`{creds.get('role', 'member').upper()}`", inline=True)
+    embed.add_field(name="Username", value=f"`{creds['username']}`", inline=True)
+    embed.add_field(name="Password", value=f"`{creds['password']}`", inline=True)
+    embed.add_field(name="Role", value=f"`{creds.get('role', 'member').upper()}`", inline=True)
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -1630,7 +1517,7 @@ async def get_user_creds(interaction: discord.Interaction, user: discord.Member)
 async def reset_user_creds(interaction: discord.Interaction, user: discord.Member):
     verified_role = discord.utils.get(interaction.guild.roles, name="✅ Verified")
     if verified_role not in user.roles:
-        await interaction.response.send_message(f"❌ {user.mention} is not verified! Only verified users get credentials.", ephemeral=True)
+        await interaction.response.send_message(f"❌ {user.mention} is not verified!", ephemeral=True)
         return
     
     is_admin = any(role.permissions.administrator for role in user.roles)
@@ -1653,48 +1540,27 @@ async def verify_command(interaction: discord.Interaction):
     
     embed = discord.Embed(
         title="🔐 **VERIFICATION REQUIRED**",
-        description=f"""
-        **Click the link below to verify:**
-        
-        [🔐 Click here to verify with Discord]({url})
-        
-        ⏰ **TIME LIMIT:** 10 minutes
-        🔒 **SECURITY:** Your data is encrypted
-        
-        **✅ WHAT HAPPENS NEXT:**
-        1. Authorize through Discord
-        2. We verify your identity
-        3. You get the ✅ Verified role
-        4. You receive your login credentials
-        """,
+        description=f"[🔐 Click here to verify]({url})",
         color=discord.Color.blue()
     )
-    embed.set_footer(text=f"Verification ID: {state[:8]}...")
-    
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="ping", description="Check bot latency")
 async def ping_command(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🏓 **PONG!**",
-        description=f"**Latency:** {round(interaction.client.latency * 1000)}ms",
-        color=discord.Color.green()
-    )
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(f"🏓 Pong! {round(interaction.client.latency * 1000)}ms")
 
 @bot.tree.command(name="shutdown", description="Shutdown the bot (Owner only)")
 async def shutdown_command(interaction: discord.Interaction):
     if interaction.user.id != int(os.getenv('SUPER_ADMIN_ID', '0')):
         await interaction.response.send_message("❌ Only the bot owner can use this!", ephemeral=True)
         return
-    await interaction.response.send_message("🔴 **Shutting down...**")
+    await interaction.response.send_message("🔴 Shutting down...")
     await bot.close()
 
 # ============ FLASK ROUTES ============
 @app.route('/')
 def home():
     return """
-    <!DOCTYPE html>
     <html>
     <head><title>EDITH Bot</title>
     <style>
@@ -1707,7 +1573,7 @@ def home():
     <body>
         <div class="container">
             <h1>🤖 EDITH Bot</h1>
-            <p>Ultimate Server Management System</p>
+            <p>Ultimate Server Management</p>
             <p class="status">✅ Online</p>
             <p>Use <code>/setup</code> in Discord</p>
         </div>
@@ -1723,79 +1589,22 @@ def oauth_callback():
         error = request.args.get('error')
         
         logger.info(f"📥 OAuth Callback received!")
-        logger.info(f"   Code: {code[:20] if code else 'None'}...")
-        logger.info(f"   State: {state[:20] if state else 'None'}...")
         
         if error:
-            return f"""
-            <html>
-            <head><title>Verification Failed</title>
-            <style>
-                body {{ font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; }}
-                .container {{ background: #2d2d44; padding: 40px; border-radius: 20px; text-align: center; }}
-                .error {{ color: #f44336; font-size: 60px; }}
-            </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="error">❌</div>
-                    <h1>Verification Failed</h1>
-                    <p>Error: {error}</p>
-                    <p>Please try <code>/verify</code> again in Discord.</p>
-                </div>
-            </body>
-            </html>
-            """
+            return f"<h1>Error: {error}</h1><p>Please try /verify again.</p>"
         
         if not code:
-            return """
-            <html>
-            <head><title>Verification Failed</title>
-            <style>
-                body { font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; }
-                .container { background: #2d2d44; padding: 40px; border-radius: 20px; text-align: center; }
-                .error { color: #f44336; font-size: 60px; }
-            </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="error">❌</div>
-                    <h1>No Code Provided</h1>
-                    <p>Please try <code>/verify</code> again in Discord.</p>
-                </div>
-            </body>
-            </html>
-            """, 400
+            return "<h1>No code provided</h1><p>Please try /verify again.</p>", 400
         
         session = None
         if state:
             session = oauth_states.pop(state, None)
-            logger.info(f"   Session found: {session is not None}")
         
         if not session:
-            return """
-            <html>
-            <head><title>Verification Failed</title>
-            <style>
-                body { font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; }
-                .container { background: #2d2d44; padding: 40px; border-radius: 20px; text-align: center; }
-                .error { color: #f44336; font-size: 60px; }
-            </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="error">❌</div>
-                    <h1>Session Expired</h1>
-                    <p>Your verification session has expired.</p>
-                    <p>Please run <code>/verify</code> again in Discord.</p>
-                </div>
-            </body>
-            </html>
-            """
+            return "<h1>Session expired</h1><p>Please run /verify again.</p>"
         
         user_id = session['user_id']
         guild_id = session['guild_id']
-        logger.info(f"   User ID: {user_id}, Guild ID: {guild_id}")
         
         import aiohttp
         import asyncio
@@ -1820,24 +1629,7 @@ def oauth_callback():
         loop.close()
         
         if not token_data:
-            return """
-            <html>
-            <head><title>Token Exchange Failed</title>
-            <style>
-                body { font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; }
-                .container { background: #2d2d44; padding: 40px; border-radius: 20px; text-align: center; }
-                .error { color: #f44336; font-size: 60px; }
-            </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="error">❌</div>
-                    <h1>Token Exchange Failed</h1>
-                    <p>Please try <code>/verify</code> again.</p>
-                </div>
-            </body>
-            </html>
-            """
+            return "<h1>Token exchange failed</h1><p>Please try again.</p>"
         
         access_token = token_data.get('access_token')
         
@@ -1855,31 +1647,15 @@ def oauth_callback():
         loop.close()
         
         if not user_data:
-            return """
-            <html>
-            <head><title>Failed to Get User Data</title>
-            <style>
-                body { font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; }
-                .container { background: #2d2d44; padding: 40px; border-radius: 20px; text-align: center; }
-                .error { color: #f44336; font-size: 60px; }
-            </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="error">❌</div>
-                    <h1>Failed to Get User Data</h1>
-                    <p>Please try <code>/verify</code> again.</p>
-                </div>
-            </body>
-            </html>
-            """
+            return "<h1>Failed to get user data</h1><p>Please try again.</p>"
         
         username = user_data.get('username')
         discord_id = user_data.get('id')
         email = user_data.get('email', 'Not provided')
         
-        logger.info(f"✅ User verified: {username} ({discord_id})")
+        logger.info(f"✅ User verified: {username}")
         
+        # Store locally
         user_data_db = db.get_user(discord_id, guild_id)
         user_data_db['verified'] = True
         user_data_db['profile'] = {
@@ -1891,6 +1667,7 @@ def oauth_callback():
         }
         db.set_user(discord_id, guild_id, user_data_db)
         
+        # Store in Firebase
         firebase_success = False
         if rtdb_client:
             try:
@@ -1907,10 +1684,11 @@ def oauth_callback():
                     'verified': True
                 })
                 firebase_success = True
-                logger.info(f"✅ Stored in Firebase: {username}")
+                logger.info(f"✅ Stored in Firebase")
             except Exception as e:
                 logger.error(f"❌ Firebase storage failed: {e}")
         
+        # Assign role
         guild = bot.get_guild(int(guild_id))
         role_assigned = False
         if guild:
@@ -1924,29 +1702,23 @@ def oauth_callback():
                             asyncio.run_coroutine_threadsafe(member.remove_roles(unverified_role), bot.loop)
                         asyncio.run_coroutine_threadsafe(member.add_roles(verified_role), bot.loop)
                         role_assigned = True
-                        logger.info(f"✅ Role assigned to {username}")
-                    except Exception as e:
-                        logger.error(f"Failed to assign role: {e}")
+                    except:
+                        pass
         
         return f"""
         <html>
-        <head>
-            <title>Verification Successful</title>
-            <style>
-                * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-                body {{ font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }}
-                .container {{ background: #2d2d44; padding: 40px; border-radius: 20px; max-width: 500px; width: 100%; }}
-                .success {{ color: #4caf50; font-size: 80px; text-align: center; }}
-                h1 {{ text-align: center; margin: 10px 0; }}
-                .info {{ background: #1e1e32; padding: 15px; border-radius: 10px; margin: 20px 0; }}
-                .info div {{ padding: 8px 0; border-bottom: 1px solid #2d2d44; display: flex; justify-content: space-between; }}
-                .info div:last-child {{ border-bottom: none; }}
-                .label {{ color: #888; }}
-                .value {{ color: white; }}
-                .button {{ background: #5865f2; color: white; border: none; padding: 15px; border-radius: 10px; font-size: 16px; cursor: pointer; text-decoration: none; display: block; text-align: center; margin-top: 20px; }}
-                .button:hover {{ background: #4752c4; }}
-                .footer {{ text-align: center; color: #666; font-size: 12px; margin-top: 20px; }}
-            </style>
+        <head><title>Verification Successful</title>
+        <style>
+            body {{ font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; }}
+            .container {{ background: #2d2d44; padding: 40px; border-radius: 20px; max-width: 500px; }}
+            .success {{ color: #4caf50; font-size: 60px; text-align: center; }}
+            h1 {{ text-align: center; }}
+            .info {{ background: #1e1e32; padding: 15px; border-radius: 10px; margin: 20px 0; }}
+            .info div {{ padding: 8px 0; border-bottom: 1px solid #2d2d44; display: flex; justify-content: space-between; }}
+            .label {{ color: #888; }}
+            .value {{ color: white; }}
+            .button {{ background: #5865f2; color: white; border: none; padding: 15px; border-radius: 10px; text-decoration: none; display: block; text-align: center; }}
+        </style>
         </head>
         <body>
             <div class="container">
@@ -1963,34 +1735,14 @@ def oauth_callback():
                 </div>
                 
                 <a href="https://discord.com/app" class="button">Return to Discord</a>
-                
-                <p class="footer">A verification DM has been sent to you! 📨</p>
             </div>
         </body>
         </html>
         """
     
     except Exception as e:
-        logger.error(f"❌ Callback error: {e}")
-        return f"""
-        <html>
-        <head><title>Verification Error</title>
-        <style>
-            body {{ font-family: Arial; background: #1a1a2e; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; }}
-            .container {{ background: #2d2d44; padding: 40px; border-radius: 20px; text-align: center; }}
-            .error {{ color: #f44336; font-size: 60px; }}
-        </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="error">❌</div>
-                <h1>Verification Error</h1>
-                <p>Error: {str(e)}</p>
-                <p>Please try <code>/verify</code> again.</p>
-            </div>
-        </body>
-        </html>
-        """
+        logger.error(f"Callback error: {e}")
+        return f"<h1>Error: {str(e)}</h1>"
 
 @app.route('/health')
 def health():
@@ -2001,7 +1753,7 @@ def health():
         'firebase': '✅ Connected' if rtdb_client else '❌ Not connected'
     })
 
-# ============ EVENTS - AUTO SYNC ON JOIN/LEAVE ============
+# ============ EVENTS ============
 @bot.event
 async def on_ready():
     print(f"""
@@ -2018,63 +1770,43 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} slash commands!")
-        for cmd in synced:
-            print(f"   /{cmd.name}")
     except Exception as e:
         print(f"❌ Failed to sync: {e}")
 
 @bot.event
 async def on_member_join(member):
-    """Auto-sync when a member joins"""
     if member.bot:
         return
     
-    logger.info(f"👋 {member.name} joined {member.guild.name} - Syncing...")
+    logger.info(f"👋 {member.name} joined - Syncing...")
     
-    # Add to unverified
     firebase_set(f'guilds/{member.guild.id}/unverified/{member.id}', {
         'discord_id': str(member.id),
         'username': member.name,
         'joined_at': datetime.now().isoformat()
     })
     
-    # Delete any existing credentials
     delete_credentials(str(member.id))
     
-    # Assign unverified role
     unverified_role = discord.utils.get(member.guild.roles, name="❌ Unverified")
     if unverified_role:
         try:
             await member.add_roles(unverified_role)
         except:
             pass
-    
-    log_channel = discord.utils.get(member.guild.channels, name="🛡️-mod-logs")
-    if log_channel:
-        await log_channel.send(f"👋 {member.mention} joined the server! Credentials will be generated upon verification.")
 
 @bot.event
 async def on_member_remove(member):
-    """Auto-sync when a member leaves"""
     if member.bot:
         return
     
-    logger.info(f"👋 {member.name} left {member.guild.name} - Deleting credentials...")
-    
-    # Delete credentials only
+    logger.info(f"👋 {member.name} left - Deleting credentials...")
     delete_credentials(str(member.id))
-    
-    # Remove from Firebase
     firebase_delete(f'guilds/{member.guild.id}/verified/{member.id}')
     firebase_delete(f'guilds/{member.guild.id}/unverified/{member.id}')
-    
-    log_channel = discord.utils.get(member.guild.channels, name="🛡️-mod-logs")
-    if log_channel:
-        await log_channel.send(f"👋 {member.mention} left the server - Credentials deleted.")
 
 @bot.event
 async def on_member_update(before, after):
-    """Auto-sync when member gets verified or role changes"""
     if before.bot or after.bot:
         return
     
@@ -2082,12 +1814,10 @@ async def on_member_update(before, after):
     was_verified = verified_role in before.roles
     is_verified = verified_role in after.roles
     
-    # Check if verification status changed
     if was_verified != is_verified:
         log_channel = discord.utils.get(after.guild.channels, name="🛡️-mod-logs")
         
         if is_verified:
-            # User just got verified - generate credentials
             logger.info(f"✅ {after.name} verified - Generating credentials...")
             
             is_admin = any(role.permissions.administrator for role in after.roles)
@@ -2107,16 +1837,9 @@ async def on_member_update(before, after):
                     creds['role'] = 'member'
                     firebase_set(f'credentials/{after.id}', creds)
                     await send_credentials_dm(after, creds, 'member', log_channel)
-            
-            if log_channel:
-                await log_channel.send(f"✅ {after.mention} verified! Credentials sent via DM.")
         else:
-            # User got unverified - delete credentials
             logger.info(f"❌ {after.name} unverified - Deleting credentials...")
             delete_credentials(str(after.id))
-            
-            if log_channel:
-                await log_channel.send(f"❌ {after.mention} unverified - Credentials deleted.")
 
 @bot.event
 async def on_message(message):
