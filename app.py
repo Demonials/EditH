@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from discord.ui import Button, View, Modal, TextInput
+from discord.ui import Button, View, Modal, TextInput, Select
 import os
 import json
 import secrets
@@ -262,96 +262,331 @@ async def send_credentials_dm(member, creds, role=None, log_channel=None):
         logger.warning(f"❌ Cannot DM {member.name}")
         return False
 
-async def process_members(guild, log_channel=None):
-    if not rtdb_client:
-        return False
+async def process_single_member(member, log_channel=None):
+    """Process a single member (called on join/update)"""
+    if not rtdb_client or member.bot:
+        return
     
     try:
-        members = guild.members
+        user_id = str(member.id)
+        guild = member.guild
         verified_role = discord.utils.get(guild.roles, name="✅ Verified")
+        is_verified = verified_role in member.roles if verified_role else False
         
-        sent_count = 0
-        for member in members:
-            if member.bot:
-                continue
-                
-            user_id = str(member.id)
-            is_verified = verified_role in member.roles if verified_role else False
+        if is_verified:
+            is_admin = any(role.permissions.administrator for role in member.roles)
+            role_type = 'moderator' if is_admin else 'member'
             
-            if is_verified:
-                is_admin = any(role.permissions.administrator for role in member.roles)
-                role_type = 'moderator' if is_admin else 'member'
-                
-                creds = get_credentials(user_id)
-                if not creds:
-                    creds = generate_credentials(user_id, role=role_type)
-                    await send_credentials_dm(member, creds, role_type, log_channel)
-                    sent_count += 1
-                    logger.info(f"🔑 Generated credentials for {member.name}")
-                else:
-                    current_role = creds.get('role', 'member')
-                    if is_admin and current_role != 'moderator':
-                        creds['role'] = 'moderator'
-                        firebase_set(f'credentials/{user_id}', creds)
-                        await send_credentials_dm(member, creds, 'moderator', log_channel)
-                        sent_count += 1
-                    elif not is_admin and current_role != 'member':
-                        creds['role'] = 'member'
-                        firebase_set(f'credentials/{user_id}', creds)
-                        await send_credentials_dm(member, creds, 'member', log_channel)
-                        sent_count += 1
+            creds = get_credentials(user_id)
+            if not creds:
+                creds = generate_credentials(user_id, role=role_type)
+                await send_credentials_dm(member, creds, role_type, log_channel)
+                logger.info(f"🔑 Generated credentials for {member.name}")
             else:
-                delete_credentials(user_id)
-            
-            user_data = {
+                current_role = creds.get('role', 'member')
+                if is_admin and current_role != 'moderator':
+                    creds['role'] = 'moderator'
+                    firebase_set(f'credentials/{user_id}', creds)
+                    await send_credentials_dm(member, creds, 'moderator', log_channel)
+                elif not is_admin and current_role != 'member':
+                    creds['role'] = 'member'
+                    firebase_set(f'credentials/{user_id}', creds)
+                    await send_credentials_dm(member, creds, 'member', log_channel)
+        else:
+            delete_credentials(user_id)
+        
+        # Update Firebase
+        user_data = {
+            'discord_id': user_id,
+            'username': member.name,
+            'global_name': member.display_name or member.name,
+            'avatar': member.avatar.url if member.avatar else None,
+            'joined_at': member.joined_at.isoformat() if member.joined_at else None,
+            'roles': [r.name for r in member.roles if r.name != "@everyone"],
+            'verified': is_verified,
+            'verified_at': datetime.now().isoformat() if is_verified else None
+        }
+        
+        if is_verified:
+            creds = get_credentials(user_id)
+            if creds:
+                user_data['credentials'] = creds
+            firebase_set(f'guilds/{guild.id}/verified/{user_id}', user_data)
+            firebase_delete(f'guilds/{guild.id}/unverified/{user_id}')
+        else:
+            firebase_set(f'guilds/{guild.id}/unverified/{user_id}', {
                 'discord_id': user_id,
                 'username': member.name,
-                'global_name': member.display_name or member.name,
-                'avatar': member.avatar.url if member.avatar else None,
-                'joined_at': member.joined_at.isoformat() if member.joined_at else None,
-                'roles': [r.name for r in member.roles if r.name != "@everyone"],
-                'verified': is_verified,
-                'verified_at': datetime.now().isoformat() if is_verified else None
-            }
-            
-            if is_verified:
-                creds = get_credentials(user_id)
-                if creds:
-                    user_data['credentials'] = creds
-                firebase_set(f'guilds/{guild.id}/verified/{user_id}', user_data)
-                firebase_delete(f'guilds/{guild.id}/unverified/{user_id}')
-            else:
-                firebase_set(f'guilds/{guild.id}/unverified/{user_id}', {
-                    'discord_id': user_id,
-                    'username': member.name,
-                    'joined_at': member.joined_at.isoformat() if member.joined_at else None
-                })
-                firebase_delete(f'guilds/{guild.id}/verified/{user_id}')
+                'joined_at': member.joined_at.isoformat() if member.joined_at else None
+            })
+            firebase_delete(f'guilds/{guild.id}/verified/{user_id}')
         
-        if sent_count > 0 and log_channel:
-            await log_channel.send(f"✅ **Sent {sent_count} new credentials!**")
-        
-        logger.info(f"✅ Processed {len(members)} members for {guild.name}")
         return True
-        
     except Exception as e:
-        logger.error(f"Failed to process members: {e}")
+        logger.error(f"Failed to process member {member.name}: {e}")
         return False
 
-# ============ AUTO SYNC ============
-@tasks.loop(seconds=30)
-async def auto_sync():
-    try:
-        for guild in bot.guilds:
-            log_channel = discord.utils.get(guild.channels, name="🛡️-mod-logs")
-            if not log_channel:
-                log_channel = discord.utils.get(guild.channels, name="🔐-verification")
-            
-            await process_members(guild, log_channel)
-    except Exception as e:
-        logger.error(f"Auto sync error: {e}")
+# ============ MODERATION SUITE VIEW ============
+class ModerationView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+    
+    @discord.ui.button(label="⛔ BAN USER", style=discord.ButtonStyle.danger, emoji="⛔", row=0)
+    async def ban_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(BanUserModal())
+    
+    @discord.ui.button(label="👢 KICK USER", style=discord.ButtonStyle.danger, emoji="👢", row=0)
+    async def kick_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(KickUserModal())
+    
+    @discord.ui.button(label="🔇 MUTE USER", style=discord.ButtonStyle.primary, emoji="🔇", row=0)
+    async def mute_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(MuteUserModal())
+    
+    @discord.ui.button(label="🔊 UNMUTE USER", style=discord.ButtonStyle.success, emoji="🔊", row=1)
+    async def unmute_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(UnmuteUserModal())
+    
+    @discord.ui.button(label="⏰ TIMEOUT USER", style=discord.ButtonStyle.warning, emoji="⏰", row=1)
+    async def timeout_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TimeoutUserModal())
+    
+    @discord.ui.button(label="⏰ REMOVE TIMEOUT", style=discord.ButtonStyle.secondary, emoji="⏰", row=1)
+    async def remove_timeout(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RemoveTimeoutModal())
+    
+    @discord.ui.button(label="ℹ️ ABOUT USER", style=discord.ButtonStyle.secondary, emoji="ℹ️", row=2)
+    async def about_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AboutUserModal())
 
-# ============ BIG SETUP VIEW WITH ALL BUTTONS ============
+class BanUserModal(Modal):
+    def __init__(self):
+        super().__init__(title="⛔ Ban User")
+        self.user_id_input = TextInput(label="User ID or @mention", placeholder="Enter user ID or @mention", required=True)
+        self.reason_input = TextInput(label="Reason", placeholder="Why ban this user?", required=False)
+        self.add_item(self.user_id_input)
+        self.add_item(self.reason_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.ban_members:
+            await interaction.response.send_message("❌ You don't have permission to ban members!", ephemeral=True)
+            return
+        
+        try:
+            user_id = int(re.search(r'\d+', self.user_id_input.value).group())
+            user = await interaction.guild.fetch_member(user_id)
+            if user:
+                await user.ban(reason=self.reason_input.value or "No reason provided")
+                embed = discord.Embed(
+                    title="⛔ User Banned",
+                    description=f"{user.mention} has been banned!",
+                    color=discord.Color.red()
+                )
+                embed.add_field(name="Reason", value=self.reason_input.value or "No reason provided")
+                await interaction.response.send_message(embed=embed)
+                await interaction.channel.send(f"⛔ {user.mention} has been banned by {interaction.user.mention}!")
+            else:
+                await interaction.response.send_message("❌ User not found!", ephemeral=True)
+        except:
+            await interaction.response.send_message("❌ Invalid user!", ephemeral=True)
+
+class KickUserModal(Modal):
+    def __init__(self):
+        super().__init__(title="👢 Kick User")
+        self.user_id_input = TextInput(label="User ID or @mention", placeholder="Enter user ID or @mention", required=True)
+        self.reason_input = TextInput(label="Reason", placeholder="Why kick this user?", required=False)
+        self.add_item(self.user_id_input)
+        self.add_item(self.reason_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.kick_members:
+            await interaction.response.send_message("❌ You don't have permission to kick members!", ephemeral=True)
+            return
+        
+        try:
+            user_id = int(re.search(r'\d+', self.user_id_input.value).group())
+            user = await interaction.guild.fetch_member(user_id)
+            if user:
+                await user.kick(reason=self.reason_input.value or "No reason provided")
+                embed = discord.Embed(
+                    title="👢 User Kicked",
+                    description=f"{user.mention} has been kicked!",
+                    color=discord.Color.orange()
+                )
+                embed.add_field(name="Reason", value=self.reason_input.value or "No reason provided")
+                await interaction.response.send_message(embed=embed)
+                await interaction.channel.send(f"👢 {user.mention} has been kicked by {interaction.user.mention}!")
+            else:
+                await interaction.response.send_message("❌ User not found!", ephemeral=True)
+        except:
+            await interaction.response.send_message("❌ Invalid user!", ephemeral=True)
+
+class MuteUserModal(Modal):
+    def __init__(self):
+        super().__init__(title="🔇 Mute User")
+        self.user_id_input = TextInput(label="User ID or @mention", placeholder="Enter user ID or @mention", required=True)
+        self.duration_input = TextInput(label="Duration (minutes)", placeholder="e.g., 60", required=True)
+        self.reason_input = TextInput(label="Reason", placeholder="Why mute this user?", required=False)
+        self.add_item(self.user_id_input)
+        self.add_item(self.duration_input)
+        self.add_item(self.reason_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.mute_members:
+            await interaction.response.send_message("❌ You don't have permission to mute members!", ephemeral=True)
+            return
+        
+        try:
+            user_id = int(re.search(r'\d+', self.user_id_input.value).group())
+            user = await interaction.guild.fetch_member(user_id)
+            if user:
+                duration_minutes = int(self.duration_input.value)
+                duration = timedelta(minutes=duration_minutes)
+                await user.timeout(duration, reason=self.reason_input.value or "No reason provided")
+                embed = discord.Embed(
+                    title="🔇 User Muted",
+                    description=f"{user.mention} has been muted for {duration_minutes} minutes!",
+                    color=discord.Color.blue()
+                )
+                embed.add_field(name="Reason", value=self.reason_input.value or "No reason provided")
+                await interaction.response.send_message(embed=embed)
+                await interaction.channel.send(f"🔇 {user.mention} has been muted by {interaction.user.mention} for {duration_minutes} minutes!")
+            else:
+                await interaction.response.send_message("❌ User not found!", ephemeral=True)
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid duration! Please enter a number.", ephemeral=True)
+        except:
+            await interaction.response.send_message("❌ Invalid user!", ephemeral=True)
+
+class UnmuteUserModal(Modal):
+    def __init__(self):
+        super().__init__(title="🔊 Unmute User")
+        self.user_id_input = TextInput(label="User ID or @mention", placeholder="Enter user ID or @mention", required=True)
+        self.add_item(self.user_id_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.mute_members:
+            await interaction.response.send_message("❌ You don't have permission to unmute members!", ephemeral=True)
+            return
+        
+        try:
+            user_id = int(re.search(r'\d+', self.user_id_input.value).group())
+            user = await interaction.guild.fetch_member(user_id)
+            if user:
+                await user.timeout(None)
+                embed = discord.Embed(
+                    title="🔊 User Unmuted",
+                    description=f"{user.mention} has been unmuted!",
+                    color=discord.Color.green()
+                )
+                await interaction.response.send_message(embed=embed)
+                await interaction.channel.send(f"🔊 {user.mention} has been unmuted by {interaction.user.mention}!")
+            else:
+                await interaction.response.send_message("❌ User not found!", ephemeral=True)
+        except:
+            await interaction.response.send_message("❌ Invalid user!", ephemeral=True)
+
+class TimeoutUserModal(Modal):
+    def __init__(self):
+        super().__init__(title="⏰ Timeout User")
+        self.user_id_input = TextInput(label="User ID or @mention", placeholder="Enter user ID or @mention", required=True)
+        self.duration_input = TextInput(label="Duration (minutes)", placeholder="e.g., 60", required=True)
+        self.reason_input = TextInput(label="Reason", placeholder="Why timeout this user?", required=False)
+        self.add_item(self.user_id_input)
+        self.add_item(self.duration_input)
+        self.add_item(self.reason_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.moderate_members:
+            await interaction.response.send_message("❌ You don't have permission to timeout members!", ephemeral=True)
+            return
+        
+        try:
+            user_id = int(re.search(r'\d+', self.user_id_input.value).group())
+            user = await interaction.guild.fetch_member(user_id)
+            if user:
+                duration_minutes = int(self.duration_input.value)
+                duration = timedelta(minutes=duration_minutes)
+                await user.timeout(duration, reason=self.reason_input.value or "No reason provided")
+                embed = discord.Embed(
+                    title="⏰ User Timed Out",
+                    description=f"{user.mention} has been timed out for {duration_minutes} minutes!",
+                    color=discord.Color.orange()
+                )
+                embed.add_field(name="Reason", value=self.reason_input.value or "No reason provided")
+                await interaction.response.send_message(embed=embed)
+                await interaction.channel.send(f"⏰ {user.mention} has been timed out by {interaction.user.mention} for {duration_minutes} minutes!")
+            else:
+                await interaction.response.send_message("❌ User not found!", ephemeral=True)
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid duration! Please enter a number.", ephemeral=True)
+        except:
+            await interaction.response.send_message("❌ Invalid user!", ephemeral=True)
+
+class RemoveTimeoutModal(Modal):
+    def __init__(self):
+        super().__init__(title="⏰ Remove Timeout")
+        self.user_id_input = TextInput(label="User ID or @mention", placeholder="Enter user ID or @mention", required=True)
+        self.add_item(self.user_id_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.moderate_members:
+            await interaction.response.send_message("❌ You don't have permission to remove timeouts!", ephemeral=True)
+            return
+        
+        try:
+            user_id = int(re.search(r'\d+', self.user_id_input.value).group())
+            user = await interaction.guild.fetch_member(user_id)
+            if user:
+                await user.timeout(None)
+                embed = discord.Embed(
+                    title="⏰ Timeout Removed",
+                    description=f"{user.mention}'s timeout has been removed!",
+                    color=discord.Color.green()
+                )
+                await interaction.response.send_message(embed=embed)
+                await interaction.channel.send(f"⏰ {user.mention}'s timeout has been removed by {interaction.user.mention}!")
+            else:
+                await interaction.response.send_message("❌ User not found!", ephemeral=True)
+        except:
+            await interaction.response.send_message("❌ Invalid user!", ephemeral=True)
+
+class AboutUserModal(Modal):
+    def __init__(self):
+        super().__init__(title="ℹ️ About User")
+        self.user_id_input = TextInput(label="User ID or @mention", placeholder="Enter user ID or @mention", required=True)
+        self.add_item(self.user_id_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            user_id = int(re.search(r'\d+', self.user_id_input.value).group())
+            user = await interaction.guild.fetch_member(user_id)
+            if user:
+                embed = discord.Embed(
+                    title=f"ℹ️ About {user.name}",
+                    color=discord.Color.blue()
+                )
+                embed.set_thumbnail(url=user.display_avatar.url)
+                embed.add_field(name="Username", value=f"{user.name}#{user.discriminator}", inline=True)
+                embed.add_field(name="ID", value=user.id, inline=True)
+                embed.add_field(name="Joined Server", value=user.joined_at.strftime("%Y-%m-%d %H:%M:%S") if user.joined_at else "Unknown", inline=True)
+                embed.add_field(name="Joined Discord", value=user.created_at.strftime("%Y-%m-%d %H:%M:%S"), inline=True)
+                embed.add_field(name="Roles", value=", ".join([r.mention for r in user.roles[1:5]]) + ("..." if len(user.roles) > 5 else ""), inline=False)
+                embed.add_field(name="Is Bot", value="✅ Yes" if user.bot else "❌ No", inline=True)
+                embed.add_field(name="Status", value=str(user.status).upper(), inline=True)
+                
+                # Check if user is verified
+                verified_role = discord.utils.get(interaction.guild.roles, name="✅ Verified")
+                is_verified = verified_role in user.roles if verified_role else False
+                embed.add_field(name="Verified", value="✅ Yes" if is_verified else "❌ No", inline=True)
+                
+                await interaction.response.send_message(embed=embed)
+            else:
+                await interaction.response.send_message("❌ User not found!", ephemeral=True)
+        except:
+            await interaction.response.send_message("❌ Invalid user!", ephemeral=True)
+
+# ============ SETUP VIEW ============
 class SetupView(View):
     def __init__(self, author):
         super().__init__(timeout=300)
@@ -424,7 +659,8 @@ class SetupView(View):
         await interaction.response.defer(ephemeral=True)
         try:
             channel = await self.create_channel(interaction.guild, "🛡️-mod-logs", "🔐 Security")
-            await interaction.followup.send(f"✅ Moderation setup complete!", ephemeral=True)
+            await self.send_moderation_message(channel)
+            await interaction.followup.send(f"✅ Moderation suite setup complete! Check {channel.mention}!", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
     
@@ -462,7 +698,11 @@ class SetupView(View):
             if not log_channel:
                 log_channel = discord.utils.get(interaction.guild.channels, name="🔐-verification")
             
-            await process_members(interaction.guild, log_channel)
+            # Process all members on manual sync
+            for member in interaction.guild.members:
+                if not member.bot:
+                    await process_single_member(member, log_channel)
+            
             await interaction.followup.send("✅ **Members synced!**", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
@@ -483,7 +723,7 @@ class SetupView(View):
             • `/sync` - Sync all members
             
             **⚡ AUTO FEATURES:**
-            • 🔄 Auto-sync every 30 seconds
+            • ✅ Auto-sync on member join/leave
             • ✅ Only verified users get credentials
             • 🗑️ Credentials deleted when user leaves
             • 🛡️ Spam protection (1 per minute)
@@ -634,25 +874,22 @@ class SetupView(View):
             if verify_channel:
                 await self.send_verification_message(verify_channel)
                 logger.info("✅ Sent verification message")
-            else:
-                logger.warning("⚠️ Verification channel not found!")
-            
             if ticket_channel:
                 await self.send_ticket_message(ticket_channel)
                 logger.info("✅ Sent ticket message")
-            else:
-                logger.warning("⚠️ Ticket channel not found!")
-            
             if giveaway_channel:
                 await self.send_giveaway_message(giveaway_channel)
                 logger.info("✅ Sent giveaway message")
-            else:
-                logger.warning("⚠️ Giveaway channel not found!")
+            if mod_channel:
+                await self.send_moderation_message(mod_channel)
+                logger.info("✅ Sent moderation message")
             
             await interaction.followup.send("🔄 **STEP 6/6:** Syncing members and generating credentials...", ephemeral=True)
             
             log_channel = mod_channel or discord.utils.get(guild.channels, name="🔐-verification")
-            await process_members(guild, log_channel)
+            for member in guild.members:
+                if not member.bot:
+                    await process_single_member(member, log_channel)
             
             embed = discord.Embed(
                 title="✅ **🎉 SERVER SETUP COMPLETE!**",
@@ -675,7 +912,7 @@ class SetupView(View):
                 • ✅ Verified members processed
                 • 📧 Credentials sent via DM
                 • 📝 Logged in #🛡️-mod-logs
-                • 🔄 Auto-sync every 30 seconds
+                • 🔄 Auto-sync on member join/leave
                 
                 🎉 **Your server is ready to go!**
                 """,
@@ -815,6 +1052,32 @@ class SetupView(View):
         embed.set_image(url="https://i.imgur.com/your-image-here.png")
         embed.set_thumbnail(url=bot.user.display_avatar.url)
         view = GiveawayMainView()
+        await channel.send(embed=embed, view=view)
+    
+    async def send_moderation_message(self, channel):
+        embed = discord.Embed(
+            title="🛡️ **MODERATION SUITE**",
+            description="""
+            **⚡ MODERATOR CONTROL PANEL**
+            
+            **📋 AVAILABLE ACTIONS:**
+            • ⛔ **Ban User** - Permanently ban a user
+            • 👢 **Kick User** - Kick a user from the server
+            • 🔇 **Mute User** - Mute a user for a specified time
+            • 🔊 **Unmute User** - Remove mute from a user
+            • ⏰ **Timeout User** - Put a user in timeout
+            • ⏰ **Remove Timeout** - Remove timeout from a user
+            • ℹ️ **About User** - Get user information
+            
+            **👮 MODERATORS ONLY**
+            Click any button below to perform moderation actions!
+            """,
+            color=discord.Color.red()
+        )
+        embed.set_image(url="https://i.imgur.com/your-image-here.png")
+        embed.set_thumbnail(url=bot.user.display_avatar.url)
+        embed.set_footer(text="EDITH Moderation System • Moderators Only")
+        view = ModerationView()
         await channel.send(embed=embed, view=view)
     
     async def save_guild_config(self, guild):
@@ -1265,27 +1528,6 @@ class RemoveUserModal(Modal):
         except:
             await interaction.response.send_message("❌ Invalid user!", ephemeral=True)
 
-class BanUserModal(Modal):
-    def __init__(self):
-        super().__init__(title="⛔ Ban User")
-        self.user_id_input = TextInput(label="User ID", placeholder="Enter user ID", required=True)
-        self.reason_input = TextInput(label="Reason", placeholder="Why ban this user?", required=False)
-        self.add_item(self.user_id_input)
-        self.add_item(self.reason_input)
-    
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            user_id = int(self.user_id_input.value)
-            user = await interaction.guild.fetch_member(user_id)
-            if user:
-                await user.ban(reason=self.reason_input.value or "Banned from ticket")
-                await interaction.response.send_message(f"✅ Banned {user.mention}!", ephemeral=True)
-                await interaction.channel.send(f"⛔ {user.mention} has been banned from the server!")
-            else:
-                await interaction.response.send_message("❌ User not found!", ephemeral=True)
-        except:
-            await interaction.response.send_message("❌ Failed to ban user!", ephemeral=True)
-
 class NoteModal(Modal):
     def __init__(self, channel_id):
         super().__init__(title="📝 Add Special Note")
@@ -1337,7 +1579,10 @@ async def sync_command(interaction: discord.Interaction):
     if not log_channel:
         log_channel = discord.utils.get(interaction.guild.channels, name="🔐-verification")
     
-    await process_members(interaction.guild, log_channel)
+    for member in interaction.guild.members:
+        if not member.bot:
+            await process_single_member(member, log_channel)
+    
     await interaction.followup.send("✅ **Sync complete!** Credentials generated and sent to verified members!", ephemeral=True)
 
 @bot.tree.command(name="credentials", description="Get your login credentials")
@@ -1756,7 +2001,7 @@ def health():
         'firebase': '✅ Connected' if rtdb_client else '❌ Not connected'
     })
 
-# ============ EVENTS ============
+# ============ EVENTS - AUTO SYNC ON JOIN/LEAVE ============
 @bot.event
 async def on_ready():
     print(f"""
@@ -1770,14 +2015,6 @@ async def on_ready():
     ╚════════════════════════════════════════╝
     """)
     
-    if not auto_sync.is_running():
-        auto_sync.start()
-        print("🔄 Auto-sync started (every 30 seconds)")
-    
-    for guild in bot.guilds:
-        log_channel = discord.utils.get(guild.channels, name="🛡️-mod-logs")
-        await process_members(guild, log_channel)
-    
     try:
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} slash commands!")
@@ -1788,9 +2025,23 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member):
+    """Auto-sync when a member joins"""
     if member.bot:
         return
     
+    logger.info(f"👋 {member.name} joined {member.guild.name} - Syncing...")
+    
+    # Add to unverified
+    firebase_set(f'guilds/{member.guild.id}/unverified/{member.id}', {
+        'discord_id': str(member.id),
+        'username': member.name,
+        'joined_at': datetime.now().isoformat()
+    })
+    
+    # Delete any existing credentials
+    delete_credentials(str(member.id))
+    
+    # Assign unverified role
     unverified_role = discord.utils.get(member.guild.roles, name="❌ Unverified")
     if unverified_role:
         try:
@@ -1798,17 +2049,32 @@ async def on_member_join(member):
         except:
             pass
     
-    firebase_set(f'guilds/{member.guild.id}/unverified/{member.id}', {
-        'discord_id': str(member.id),
-        'username': member.name,
-        'joined_at': datetime.now().isoformat()
-    })
+    log_channel = discord.utils.get(member.guild.channels, name="🛡️-mod-logs")
+    if log_channel:
+        await log_channel.send(f"👋 {member.mention} joined the server! Credentials will be generated upon verification.")
+
+@bot.event
+async def on_member_remove(member):
+    """Auto-sync when a member leaves"""
+    if member.bot:
+        return
     
+    logger.info(f"👋 {member.name} left {member.guild.name} - Deleting credentials...")
+    
+    # Delete credentials only
     delete_credentials(str(member.id))
-    logger.info(f"👋 {member.name} joined {member.guild.name}")
+    
+    # Remove from Firebase
+    firebase_delete(f'guilds/{member.guild.id}/verified/{member.id}')
+    firebase_delete(f'guilds/{member.guild.id}/unverified/{member.id}')
+    
+    log_channel = discord.utils.get(member.guild.channels, name="🛡️-mod-logs")
+    if log_channel:
+        await log_channel.send(f"👋 {member.mention} left the server - Credentials deleted.")
 
 @bot.event
 async def on_member_update(before, after):
+    """Auto-sync when member gets verified or role changes"""
     if before.bot or after.bot:
         return
     
@@ -1816,23 +2082,41 @@ async def on_member_update(before, after):
     was_verified = verified_role in before.roles
     is_verified = verified_role in after.roles
     
-    if not was_verified and is_verified:
-        creds = get_credentials(str(after.id))
-        if not creds:
+    # Check if verification status changed
+    if was_verified != is_verified:
+        log_channel = discord.utils.get(after.guild.channels, name="🛡️-mod-logs")
+        
+        if is_verified:
+            # User just got verified - generate credentials
+            logger.info(f"✅ {after.name} verified - Generating credentials...")
+            
             is_admin = any(role.permissions.administrator for role in after.roles)
             role_type = 'moderator' if is_admin else 'member'
-            creds = generate_credentials(str(after.id), role=role_type)
             
-            log_channel = discord.utils.get(after.guild.channels, name="🛡️-mod-logs")
-            await send_credentials_dm(after, creds, role_type, log_channel)
-            logger.info(f"✅ Generated credentials for newly verified {after.name}")
-
-@bot.event
-async def on_member_remove(member):
-    if member.bot:
-        return
-    delete_credentials(str(member.id))
-    logger.info(f"👋 {member.name} left {member.guild.name} - credentials deleted")
+            creds = get_credentials(str(after.id))
+            if not creds:
+                creds = generate_credentials(str(after.id), role=role_type)
+                await send_credentials_dm(after, creds, role_type, log_channel)
+            else:
+                current_role = creds.get('role', 'member')
+                if is_admin and current_role != 'moderator':
+                    creds['role'] = 'moderator'
+                    firebase_set(f'credentials/{after.id}', creds)
+                    await send_credentials_dm(after, creds, 'moderator', log_channel)
+                elif not is_admin and current_role != 'member':
+                    creds['role'] = 'member'
+                    firebase_set(f'credentials/{after.id}', creds)
+                    await send_credentials_dm(after, creds, 'member', log_channel)
+            
+            if log_channel:
+                await log_channel.send(f"✅ {after.mention} verified! Credentials sent via DM.")
+        else:
+            # User got unverified - delete credentials
+            logger.info(f"❌ {after.name} unverified - Deleting credentials...")
+            delete_credentials(str(after.id))
+            
+            if log_channel:
+                await log_channel.send(f"❌ {after.mention} unverified - Credentials deleted.")
 
 @bot.event
 async def on_message(message):
