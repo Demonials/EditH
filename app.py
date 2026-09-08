@@ -854,30 +854,21 @@ class SetupView(View):
         if interaction.user != self.author:
             await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
             return
-        
-        # Ask for channel
-        modal = VerificationSetupModal()
-        await interaction.response.send_modal(modal)
+        await interaction.response.send_modal(VerificationSetupModal())
     
     @discord.ui.button(label="🎫 TICKET SYSTEM", style=discord.ButtonStyle.secondary, emoji="🎫", row=0)
     async def setup_tickets(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user != self.author:
             await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
             return
-        
-        # Ask for channel
-        modal = TicketSetupModal()
-        await interaction.response.send_modal(modal)
+        await interaction.response.send_modal(TicketSetupModal())
     
     @discord.ui.button(label="🎁 GIVEAWAY SYSTEM", style=discord.ButtonStyle.primary, emoji="🎁", row=0)
     async def setup_giveaways(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user != self.author:
             await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
             return
-        
-        # Ask for channel
-        modal = GiveawaySetupModal()
-        await interaction.response.send_modal(modal)
+        await interaction.response.send_modal(GiveawaySetupModal())
     
     @discord.ui.button(label="👑 ROLE MANAGEMENT", style=discord.ButtonStyle.secondary, emoji="👑", row=1)
     async def setup_roles(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -896,10 +887,7 @@ class SetupView(View):
         if interaction.user != self.author:
             await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
             return
-        
-        # Ask for channel
-        modal = ModerationSetupModal()
-        await interaction.response.send_modal(modal)
+        await interaction.response.send_modal(ModerationSetupModal())
     
     @discord.ui.button(label="📊 SERVER STATS", style=discord.ButtonStyle.secondary, emoji="📊", row=1)
     async def setup_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1433,10 +1421,31 @@ class VerificationSetupModal(Modal):
                     )
                 )
             
-            await send_verification_message(channel)
+            await self.send_verification_message(channel)
             await interaction.response.send_message(f"✅ Verification system setup complete in {channel.mention}!", ephemeral=True)
         except ValueError:
             await interaction.response.send_message("❌ Invalid channel ID! Please enter a valid number.", ephemeral=True)
+    
+    async def send_verification_message(self, channel):
+        embed = discord.Embed(
+            title="🔐 **VERIFICATION REQUIRED**",
+            description="""
+            **🔒 WHY VERIFY?**
+            • 🛡️ **SECURITY** - Protect your account
+            • 🎮 **ACCESS** - Unlock full server features
+            • 👤 **IDENTITY** - Verify your Discord identity
+            
+            **✅ HOW TO VERIFY:**
+            1. Click the **VERIFY VIA DISCORD** button below
+            2. Authorize through Discord OAuth
+            3. Get the ✅ Verified role
+            4. Receive your login credentials
+            """,
+            color=discord.Color.blue()
+        )
+        embed.set_thumbnail(url=bot.user.display_avatar.url)
+        view = VerifyView()
+        await channel.send(embed=embed, view=view)
 
 class TicketSetupModal(Modal):
     def __init__(self):
@@ -1457,10 +1466,19 @@ class TicketSetupModal(Modal):
                 await interaction.response.send_message("❌ Channel not found!", ephemeral=True)
                 return
             
-            await send_ticket_message(channel)
+            await self.send_ticket_message(channel)
             await interaction.response.send_message(f"✅ Ticket system setup complete in {channel.mention}!", ephemeral=True)
         except ValueError:
             await interaction.response.send_message("❌ Invalid channel ID!", ephemeral=True)
+    
+    async def send_ticket_message(self, channel):
+        embed = discord.Embed(
+            title="🎫 **TICKET SYSTEM**",
+            description="Click a button below to create a ticket!",
+            color=discord.Color.purple()
+        )
+        view = TicketView()
+        await channel.send(embed=embed, view=view)
 
 class GiveawaySetupModal(Modal):
     def __init__(self):
@@ -1481,10 +1499,20 @@ class GiveawaySetupModal(Modal):
                 await interaction.response.send_message("❌ Channel not found!", ephemeral=True)
                 return
             
-            await send_giveaway_message(channel)
+            await self.send_giveaway_message(channel)
             await interaction.response.send_message(f"✅ Giveaway system setup complete in {channel.mention}!", ephemeral=True)
         except ValueError:
             await interaction.response.send_message("❌ Invalid channel ID!", ephemeral=True)
+    
+    async def send_giveaway_message(self, channel):
+        embed = discord.Embed(
+            title="🎉 **GIVEAWAY CENTER**",
+            description="👑 Admin only: Host exciting giveaways!",
+            color=discord.Color.gold()
+        )
+        embed.set_thumbnail(url=bot.user.display_avatar.url)
+        view = GiveawayMainView()
+        await channel.send(embed=embed, view=view)
 
 class ModerationSetupModal(Modal):
     def __init__(self):
@@ -1505,10 +1533,33 @@ class ModerationSetupModal(Modal):
                 await interaction.response.send_message("❌ Channel not found!", ephemeral=True)
                 return
             
-            await send_moderation_message(channel)
+            await self.send_moderation_message(channel)
             await interaction.response.send_message(f"✅ Moderation suite setup complete in {channel.mention}!", ephemeral=True)
         except ValueError:
             await interaction.response.send_message("❌ Invalid channel ID!", ephemeral=True)
+    
+    async def send_moderation_message(self, channel):
+        embed = discord.Embed(
+            title="🛡️ **MODERATION SUITE**",
+            description="""
+            **⚡ MODERATOR CONTROL PANEL**
+            
+            **📋 AVAILABLE ACTIONS:**
+            • ⛔ **Ban User** - Permanently ban
+            • 👢 **Kick User** - Kick from server
+            • 🔇 **Mute User** - Mute for duration
+            • 🔊 **Unmute User** - Remove mute
+            • ⏰ **Timeout User** - Timeout for duration
+            • ⏰ **Remove Timeout** - Remove timeout
+            • ℹ️ **About User** - Full user info
+            
+            **👮 MODERATORS ONLY**
+            Click any button below!
+            """,
+            color=discord.Color.red()
+        )
+        view = ModerationView()
+        await channel.send(embed=embed, view=view)
 
 # ============ OAUTH ============
 class OAuthVerification:
@@ -1541,7 +1592,7 @@ class VerifyView(View):
     def __init__(self):
         super().__init__(timeout=None)
     
-    @discord.ui.button(label="🔐 VERIFY VIA DISCORD", style=discord.ButtonStyle.link, emoji="🔐")
+    @discord.ui.button(label="🔐 VERIFY VIA DISCORD", style=discord.ButtonStyle.success, emoji="🔐")
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = str(interaction.user.id)
         guild_id = str(interaction.guild.id)
@@ -1553,17 +1604,23 @@ class VerifyView(View):
         
         url, state = oauth.generate_oauth_url(user_id, guild_id)
         
+        # Create a view with a link button
+        view = View()
+        link_button = Button(
+            label="🔐 Click to Verify",
+            style=discord.ButtonStyle.link,
+            url=url,
+            emoji="🔐"
+        )
+        view.add_item(link_button)
+        
         embed = discord.Embed(
             title="🔐 **AUTHORIZE VERIFICATION**",
             description=f"""
-            **Click the link below to verify your identity:**
-            
-            [🔐 Click here to verify with Discord]({url})
+            **Click the button below to verify your identity:**
             
             ⏰ **TIME LIMIT:** 10 minutes
             🔒 **SECURITY:** Your data is encrypted and secure
-            📧 **EMAIL:** We'll verify your email
-            🛡️ **CONNECTIONS:** We'll check your connected accounts
             
             **✅ WHAT HAPPENS NEXT:**
             1. You authorize through Discord
@@ -1576,35 +1633,7 @@ class VerifyView(View):
         )
         embed.set_footer(text=f"Verification ID: {state[:8]}...")
         
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    
-    @discord.ui.button(label="ℹ️ WHAT IS VERIFICATION?", style=discord.ButtonStyle.secondary, emoji="ℹ️")
-    async def info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="ℹ️ **WHAT IS VERIFICATION?**",
-            description="""
-            **🔒 VERIFICATION HELPS US:**
-            • 🛡️ **Keep the server safe** from bots and trolls
-            • 👤 **Confirm your identity** as a real Discord user
-            • 🎮 **Unlock full access** to all server features
-            • 🏆 **Get special roles** and permissions
-            • 🔐 **Secure your account** with OAuth2
-            
-            **❌ WHAT WE DON'T DO:**
-            • ❌ Share your data with anyone
-            • ❌ Store your password
-            • ❌ Post on your behalf
-            • ❌ Access your DMs
-            
-            **📋 DATA WE COLLECT:**
-            • Username and ID
-            • Email address
-            • Server membership
-            • OAuth tokens (encrypted)
-            """,
-            color=discord.Color.blue()
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 # ============ GIVEAWAY SYSTEM ============
 class GiveawayMainView(View):
@@ -2056,12 +2085,19 @@ async def verify_command(interaction: discord.Interaction):
     
     url, state = oauth.generate_oauth_url(user_id, guild_id)
     
+    view = View()
+    link_button = Button(
+        label="🔐 Click to Verify",
+        style=discord.ButtonStyle.link,
+        url=url,
+        emoji="🔐"
+    )
+    view.add_item(link_button)
+    
     embed = discord.Embed(
         title="🔐 **VERIFICATION REQUIRED**",
         description=f"""
-        **Click the link below to verify:**
-        
-        [🔐 Click here to verify with Discord]({url})
+        **Click the button below to verify:**
         
         ⏰ **TIME LIMIT:** 10 minutes
         🔒 **SECURITY:** Your data is encrypted
@@ -2076,7 +2112,7 @@ async def verify_command(interaction: discord.Interaction):
     )
     embed.set_footer(text=f"Verification ID: {state[:8]}...")
     
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 @bot.tree.command(name="ping", description="Check bot latency")
 async def ping_command(interaction: discord.Interaction):
