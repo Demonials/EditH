@@ -619,7 +619,7 @@ class ServerManagementView(View):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
-    @discord.ui.button(label="🔧 SETUP PERMISSIONS", style=discord.ButtonStyle.warning, emoji="🔧", row=1)
+    @discord.ui.button(label="🔧 SETUP PERMISSIONS", style=discord.ButtonStyle.secondary, emoji="🔧", row=1)
     async def setup_permissions(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Only admins can use this!", ephemeral=True)
