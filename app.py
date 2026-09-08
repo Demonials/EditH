@@ -755,7 +755,8 @@ class SetupView(View):
                 if role.name != "@everyone" and not role.managed:
                     try:
                         await role.delete()
-                        role_count += 1                        logger.info(f"🗑️ Deleted role: {role.name}")
+                        role_count += 1                      
+                        logger.info(f"🗑️ Deleted role: {role.name}")
                         await asyncio.sleep(0.2)
                     except Exception as e:
                         logger.warning(f"Could not delete role {role.name}: {e}")
