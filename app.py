@@ -9,10 +9,13 @@ import asyncio
 import random
 import re
 import aiohttp
+from aiohttp import web
 import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import string
+import time
+from urllib.parse import urlencode
 
 # ============ SETUP LOGGING ============
 os.makedirs('./logs', exist_ok=True)
@@ -179,33 +182,41 @@ def firebase_delete(path):
     return False
 
 def generate_credentials(user_id, username=None, role='member'):
+    user_id = str(user_id)
     existing = firebase_get(f'credentials/{user_id}')
     if existing:
+        # Repair the reverse index for legacy records.
+        if existing.get('username'):
+            firebase_set(f"credentials_by_username/{existing['username']}", {'user_id': user_id, 'updated_at': datetime.now().isoformat()})
         return existing
-    
-    if not username:
-        username = f"user_{str(user_id)[:6]}_{secrets.token_hex(4)}"
-    
+
+    # Always generate a unique username, even if Firebase has stale/duplicate data.
+    for _ in range(12):
+        candidate = username or f"user_{user_id[:8]}_{secrets.token_hex(4)}"
+        if not firebase_get(f'credentials_by_username/{candidate}'):
+            username = candidate
+            break
+        username = f"user_{user_id[:8]}_{secrets.token_hex(6)}"
+
     alphabet = string.ascii_letters + string.digits + '!@#$%^&*'
-    password = ''.join(secrets.choice(alphabet) for _ in range(16))
-    
+    password = ''.join(secrets.choice(alphabet) for _ in range(20))
+    now = datetime.now().isoformat()
     creds = {
-        'username': username,
-        'password': password,
-        'role': role,
-        'user_id': user_id,
-        'created_at': datetime.now().isoformat()
+        'username': username, 'password': password, 'role': role, 'user_id': user_id,
+        'created_at': now, 'updated_at': now, 'credential_version': 2
     }
-    
     firebase_set(f'credentials/{user_id}', creds)
+    firebase_set(f'credentials_by_username/{username}', {'user_id': user_id, 'created_at': now})
     return creds
 
 def get_credentials(user_id):
     return firebase_get(f'credentials/{user_id}')
 
 def delete_credentials(user_id):
+    old = firebase_get(f'credentials/{user_id}')
     firebase_delete(f'credentials/{user_id}')
-    firebase_delete(f'credentials_by_username/{user_id}')
+    if old and old.get('username'):
+        firebase_delete(f"credentials_by_username/{old['username']}")
     logger.info(f"🗑️ Deleted credentials for {user_id}")
 
 sent_credentials_cache = {}
@@ -285,7 +296,14 @@ async def process_single_member(member, log_channel=None):
                     firebase_set(f'credentials/{user_id}', creds)
                     await send_credentials_dm(member, creds, 'member', log_channel)
         else:
-            delete_credentials(user_id)
+            # Credentials belong to the Discord account, not one guild. Never delete them merely
+            # because the same user is unverified in a different server.
+            verified_elsewhere = any(
+                g.id != guild.id and (g.get_member(member.id) and (discord.utils.get(g.roles, name='✅ Verified') in g.get_member(member.id).roles if discord.utils.get(g.roles, name='✅ Verified') else False))
+                for g in bot.guilds
+            )
+            if not verified_elsewhere:
+                delete_credentials(user_id)
         
         user_data = {
             'discord_id': user_id,
@@ -311,7 +329,23 @@ async def process_single_member(member, log_channel=None):
                 'joined_at': member.joined_at.isoformat() if member.joined_at else None
             })
             firebase_delete(f'guilds/{guild.id}/verified/{user_id}')
-        
+
+        # Keep a reverse index so the website can find every server the user shares with EDITH.
+        firebase_set(f'user_guilds/{user_id}/{guild.id}', {
+            'guild_id': str(guild.id),
+            'guild_name': guild.name,
+            'guild_icon': guild.icon.url if guild.icon else None,
+            'is_owner': guild.owner_id == member.id,
+            'is_admin': member.guild_permissions.administrator,
+            'permissions': member.guild_permissions.value,
+            'updated_at': datetime.now().isoformat()
+        })
+        firebase_set(f'profiles/{user_id}', {
+            'discord_id': user_id, 'username': member.name,
+            'global_name': member.display_name or member.name,
+            'avatar': member.display_avatar.url,
+            'updated_at': datetime.now().isoformat()
+        })
         return True
     except Exception as e:
         logger.error(f"Failed to process member {member.name}: {e}")
@@ -322,49 +356,49 @@ class ModerationView(View):
     def __init__(self):
         super().__init__(timeout=None)
     
-    @discord.ui.button(label="⛔ BAN USER", style=discord.ButtonStyle.danger, emoji="⛔", row=0)
+    @discord.ui.button(label="⛔ BAN USER", style=discord.ButtonStyle.danger, emoji="⛔", row=0, custom_id="edith:moderation:ban")
     async def ban_user(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.ban_members:
             await interaction.response.send_message("❌ You don't have permission to ban members!", ephemeral=True)
             return
         await interaction.response.send_modal(BanUserModal())
     
-    @discord.ui.button(label="👢 KICK USER", style=discord.ButtonStyle.danger, emoji="👢", row=0)
+    @discord.ui.button(label="👢 KICK USER", style=discord.ButtonStyle.danger, emoji="👢", row=0, custom_id="edith:moderation:kick")
     async def kick_user(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.kick_members:
             await interaction.response.send_message("❌ You don't have permission to kick members!", ephemeral=True)
             return
         await interaction.response.send_modal(KickUserModal())
     
-    @discord.ui.button(label="🔇 MUTE USER", style=discord.ButtonStyle.primary, emoji="🔇", row=0)
+    @discord.ui.button(label="🔇 MUTE USER", style=discord.ButtonStyle.primary, emoji="🔇", row=0, custom_id="edith:moderation:mute")
     async def mute_user(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.mute_members:
             await interaction.response.send_message("❌ You don't have permission to mute members!", ephemeral=True)
             return
         await interaction.response.send_modal(MuteUserModal())
     
-    @discord.ui.button(label="🔊 UNMUTE USER", style=discord.ButtonStyle.success, emoji="🔊", row=1)
+    @discord.ui.button(label="🔊 UNMUTE USER", style=discord.ButtonStyle.success, emoji="🔊", row=1, custom_id="edith:moderation:unmute")
     async def unmute_user(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.mute_members:
             await interaction.response.send_message("❌ You don't have permission to unmute members!", ephemeral=True)
             return
         await interaction.response.send_modal(UnmuteUserModal())
     
-    @discord.ui.button(label="⏰ TIMEOUT USER", style=discord.ButtonStyle.secondary, emoji="⏰", row=1)
+    @discord.ui.button(label="⏰ TIMEOUT USER", style=discord.ButtonStyle.secondary, emoji="⏰", row=1, custom_id="edith:moderation:timeout")
     async def timeout_user(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.moderate_members:
             await interaction.response.send_message("❌ You don't have permission to timeout members!", ephemeral=True)
             return
         await interaction.response.send_modal(TimeoutUserModal())
     
-    @discord.ui.button(label="⏰ REMOVE TIMEOUT", style=discord.ButtonStyle.secondary, emoji="⏰", row=1)
+    @discord.ui.button(label="⏰ REMOVE TIMEOUT", style=discord.ButtonStyle.secondary, emoji="⏰", row=1, custom_id="edith:moderation:untimeout")
     async def remove_timeout(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.moderate_members:
             await interaction.response.send_message("❌ You don't have permission to remove timeouts!", ephemeral=True)
             return
         await interaction.response.send_modal(RemoveTimeoutModal())
     
-    @discord.ui.button(label="ℹ️ ABOUT USER", style=discord.ButtonStyle.secondary, emoji="ℹ️", row=2)
+    @discord.ui.button(label="ℹ️ ABOUT USER", style=discord.ButtonStyle.secondary, emoji="ℹ️", row=2, custom_id="edith:moderation:about")
     async def about_user(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AboutUserModal())
 
@@ -377,6 +411,9 @@ class BanUserModal(Modal):
         self.add_item(self.reason_input)
     
     async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.ban_members and not interaction.user.guild_permissions.administrator and interaction.user.id != interaction.guild.owner_id:
+            await interaction.response.send_message("❌ You don't have permission to ban members!", ephemeral=True)
+            return
         try:
             user_id = int(re.search(r'\d+', self.user_id_input.value).group())
             user = await interaction.guild.fetch_member(user_id)
@@ -404,6 +441,9 @@ class KickUserModal(Modal):
         self.add_item(self.reason_input)
     
     async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.kick_members and not interaction.user.guild_permissions.administrator and interaction.user.id != interaction.guild.owner_id:
+            await interaction.response.send_message("❌ You don't have permission to kick members!", ephemeral=True)
+            return
         try:
             user_id = int(re.search(r'\d+', self.user_id_input.value).group())
             user = await interaction.guild.fetch_member(user_id)
@@ -576,21 +616,21 @@ class ServerManagementView(View):
     def __init__(self):
         super().__init__(timeout=None)
     
-    @discord.ui.button(label="📢 SEND ANNOUNCEMENT", style=discord.ButtonStyle.primary, emoji="📢", row=0)
+    @discord.ui.button(label="📢 SEND ANNOUNCEMENT", style=discord.ButtonStyle.primary, emoji="📢", row=0, custom_id="edith:server:announcement")
     async def send_announcement(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Only admins can use this!", ephemeral=True)
             return
         await interaction.response.send_modal(AnnouncementModal())
     
-    @discord.ui.button(label="📩 SEND DM TO USER", style=discord.ButtonStyle.success, emoji="📩", row=0)
+    @discord.ui.button(label="📩 SEND DM TO USER", style=discord.ButtonStyle.success, emoji="📩", row=0, custom_id="edith:server:dm")
     async def send_dm(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Only admins can use this!", ephemeral=True)
             return
         await interaction.response.send_modal(DMUserModal())
     
-    @discord.ui.button(label="📊 SERVER STATS", style=discord.ButtonStyle.secondary, emoji="📊", row=0)
+    @discord.ui.button(label="📊 SERVER STATS", style=discord.ButtonStyle.secondary, emoji="📊", row=0, custom_id="edith:server:stats")
     async def server_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
         
@@ -612,7 +652,7 @@ class ServerManagementView(View):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
-    @discord.ui.button(label="🔧 SETUP PERMISSIONS", style=discord.ButtonStyle.secondary, emoji="🔧", row=1)
+    @discord.ui.button(label="🔧 SETUP PERMISSIONS", style=discord.ButtonStyle.secondary, emoji="🔧", row=1, custom_id="edith:server:permissions")
     async def setup_permissions(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Only admins can use this!", ephemeral=True)
@@ -670,16 +710,16 @@ class ServerManagementView(View):
 
 class QuickActionsView(View):
     def __init__(self):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
     
-    @discord.ui.button(label="🔇 Mute All", style=discord.ButtonStyle.danger, emoji="🔇")
+    @discord.ui.button(label="🔇 Mute All", style=discord.ButtonStyle.danger, emoji="🔇", custom_id="edith:quick:muteall")
     async def mute_all(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Only admins can use this!", ephemeral=True)
             return
         await interaction.response.send_modal(MuteAllModal())
     
-    @discord.ui.button(label="🔊 Unmute All", style=discord.ButtonStyle.success, emoji="🔊")
+    @discord.ui.button(label="🔊 Unmute All", style=discord.ButtonStyle.success, emoji="🔊", custom_id="edith:quick:unmuteall")
     async def unmute_all(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Only admins can use this!", ephemeral=True)
@@ -697,7 +737,7 @@ class QuickActionsView(View):
         
         await interaction.response.send_message(f"✅ Unmuted {count} members!", ephemeral=True)
     
-    @discord.ui.button(label="📊 Member Count", style=discord.ButtonStyle.secondary, emoji="📊")
+    @discord.ui.button(label="📊 Member Count", style=discord.ButtonStyle.secondary, emoji="📊", custom_id="edith:quick:members")
     async def member_count(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
         total = guild.member_count
@@ -1547,7 +1587,7 @@ class OAuthVerification:
     def __init__(self):
         self.client_id = os.getenv('CLIENT_ID')
         self.client_secret = os.getenv('CLIENT_SECRET')
-        self.redirect_uri = os.getenv('REDIRECT_URI', 'https://edith-bot-api.vercel.app/callback')
+        self.redirect_uri = (os.getenv('REDIRECT_URI') or (os.getenv('WEBSITE_URL','').rstrip('/') + '/callback')).rstrip('/')
         logger.info(f"🔐 OAuth initialized")
         logger.info(f"   Redirect URI: {self.redirect_uri}")
     
@@ -1569,13 +1609,14 @@ class OAuthVerification:
             except Exception as e:
                 logger.error(f"Failed to store in Firebase: {e}")
         
-        url = (f"https://discord.com/api/oauth2/authorize?"
-               f"client_id={self.client_id}&"
-               f"redirect_uri={self.redirect_uri}&"
-               f"response_type=code&"
-               f"scope=identify%20email%20guilds%20connections&"
-               f"state={state}&"
-               f"prompt=consent")
+        url = "https://discord.com/api/oauth2/authorize?" + urlencode({
+            'client_id': self.client_id or '',
+            'redirect_uri': self.redirect_uri,
+            'response_type': 'code',
+            'scope': 'identify email guilds',
+            'state': state,
+            'prompt': 'consent'
+        })
         return url, state
 
 oauth = OAuthVerification()
@@ -1585,7 +1626,7 @@ class VerifyView(View):
     def __init__(self):
         super().__init__(timeout=None)
     
-    @discord.ui.button(label="🔐 VERIFY VIA DISCORD", style=discord.ButtonStyle.success, emoji="🔐")
+    @discord.ui.button(label="🔐 VERIFY VIA DISCORD", style=discord.ButtonStyle.success, emoji="🔐", custom_id="edith:verify")
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = str(interaction.user.id)
         guild_id = str(interaction.guild.id)
@@ -1632,7 +1673,7 @@ class GiveawayMainView(View):
     def __init__(self):
         super().__init__(timeout=None)
     
-    @discord.ui.button(label="🎁 HOST GIVEAWAY", style=discord.ButtonStyle.success, emoji="🎁")
+    @discord.ui.button(label="🎁 HOST GIVEAWAY", style=discord.ButtonStyle.success, emoji="🎁", custom_id="edith:giveaway:host")
     async def host_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Not enough permissions kiddo! 👶", ephemeral=True)
@@ -1675,6 +1716,7 @@ class GiveawayModal(Modal):
             embed.set_image(url="https://i.imgur.com/your-image-here.png")
             view = GiveawayParticipateView(giveaway_id, end_time, winners_count, interaction.user.id)
             await interaction.response.send_message(embed=embed, view=view)
+            message = await interaction.original_response()
             
             db.data['giveaways'][giveaway_id] = {
                 'name': self.name.value,
@@ -1682,7 +1724,12 @@ class GiveawayModal(Modal):
                 'host': interaction.user.id,
                 'winners': winners_count,
                 'end_time': end_time.isoformat(),
-                'participants': []
+                'participants': [],
+                'guild_id': str(interaction.guild.id),
+                'channel_id': str(interaction.channel.id),
+                'message_id': str(message.id),
+                'status': 'active',
+                'created_at': datetime.now().isoformat()
             }
             db.save_data()
             
@@ -1726,11 +1773,15 @@ class GiveawayModal(Modal):
 class GiveawayParticipateView(View):
     def __init__(self, giveaway_id, end_time, winners_count, host_id):
         super().__init__(timeout=None)
-        self.giveaway_id = giveaway_id
+        self.giveaway_id = str(giveaway_id)
         self.end_time = end_time
-        self.host_id = host_id
+        self.host_id = int(host_id)
+        # Persistent buttons need stable, message-specific custom IDs.
+        for child in self.children:
+            suffix = getattr(child, "custom_id", "").split(":")[-1]
+            child.custom_id = f"edith:giveaway:{self.giveaway_id}:{suffix}"
     
-    @discord.ui.button(label="🎯 PARTICIPATE", style=discord.ButtonStyle.success, emoji="🎯")
+    @discord.ui.button(label="🎯 PARTICIPATE", style=discord.ButtonStyle.success, emoji="🎯", custom_id="participate")
     async def participate(self, interaction: discord.Interaction, button: discord.ui.Button):
         giveaway_data = db.data['giveaways'].get(self.giveaway_id)
         if not giveaway_data:
@@ -1747,7 +1798,7 @@ class GiveawayParticipateView(View):
         db.save_data()
         await interaction.response.send_message("✅ You're participating!", ephemeral=True)
     
-    @discord.ui.button(label="❌ UN-PARTICIPATE", style=discord.ButtonStyle.danger, emoji="❌")
+    @discord.ui.button(label="❌ UN-PARTICIPATE", style=discord.ButtonStyle.danger, emoji="❌", custom_id="unparticipate")
     async def unparticipate(self, interaction: discord.Interaction, button: discord.ui.Button):
         giveaway_data = db.data['giveaways'].get(self.giveaway_id)
         if giveaway_data and interaction.user.id in giveaway_data['participants']:
@@ -1757,7 +1808,7 @@ class GiveawayParticipateView(View):
         else:
             await interaction.response.send_message("❌ Not participating!", ephemeral=True)
     
-    @discord.ui.button(label="🗑️ DELETE GIVEAWAY", style=discord.ButtonStyle.danger, emoji="🗑️")
+    @discord.ui.button(label="🗑️ DELETE GIVEAWAY", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="delete")
     async def delete_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.host_id and not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Not enough permissions kiddo! 👶", ephemeral=True)
@@ -1767,7 +1818,7 @@ class GiveawayParticipateView(View):
         await interaction.response.send_message("✅ Giveaway deleted!", ephemeral=True)
         await interaction.message.delete()
     
-    @discord.ui.button(label="🔄 REROLL", style=discord.ButtonStyle.primary, emoji="🔄")
+    @discord.ui.button(label="🔄 REROLL", style=discord.ButtonStyle.primary, emoji="🔄", custom_id="reroll")
     async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.host_id and not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Not enough permissions kiddo! 👶", ephemeral=True)
@@ -1783,15 +1834,15 @@ class TicketView(View):
     def __init__(self):
         super().__init__(timeout=None)
     
-    @discord.ui.button(label="🛠️ SERVER RELATED", style=discord.ButtonStyle.primary, emoji="🛠️")
+    @discord.ui.button(label="🛠️ SERVER RELATED", style=discord.ButtonStyle.primary, emoji="🛠️", custom_id="edith:ticket:server")
     async def server_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.create_ticket(interaction, "Server Related")
     
-    @discord.ui.button(label="👮 CONTACT MODS", style=discord.ButtonStyle.danger, emoji="👮")
+    @discord.ui.button(label="👮 CONTACT MODS", style=discord.ButtonStyle.danger, emoji="👮", custom_id="edith:ticket:mods")
     async def mod_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.create_ticket(interaction, "Contact Mods")
     
-    @discord.ui.button(label="❓ OTHERS", style=discord.ButtonStyle.secondary, emoji="❓")
+    @discord.ui.button(label="❓ OTHERS", style=discord.ButtonStyle.secondary, emoji="❓", custom_id="edith:ticket:other")
     async def other_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.create_ticket(interaction, "Others")
     
@@ -1854,25 +1905,28 @@ class TicketView(View):
 class TicketControlView(View):
     def __init__(self, user_id, channel_id):
         super().__init__(timeout=None)
-        self.user_id = user_id
-        self.channel_id = channel_id
+        self.user_id = int(user_id)
+        self.channel_id = int(channel_id)
+        for child in self.children:
+            suffix = getattr(child, "custom_id", "").split(":")[-1]
+            child.custom_id = f"edith:ticketcontrol:{self.channel_id}:{suffix}"
     
-    @discord.ui.button(label="➕ ADD USER", style=discord.ButtonStyle.success, emoji="➕")
+    @discord.ui.button(label="➕ ADD USER", style=discord.ButtonStyle.success, emoji="➕", custom_id="add")
     async def add_user(self, interaction: discord.Interaction, button: discord.ui.Button):
         modal = AddUserModal(self.channel_id)
         await interaction.response.send_modal(modal)
     
-    @discord.ui.button(label="➖ REMOVE USER", style=discord.ButtonStyle.danger, emoji="➖")
+    @discord.ui.button(label="➖ REMOVE USER", style=discord.ButtonStyle.danger, emoji="➖", custom_id="remove")
     async def remove_user(self, interaction: discord.Interaction, button: discord.ui.Button):
         modal = RemoveUserModal(self.channel_id)
         await interaction.response.send_modal(modal)
     
-    @discord.ui.button(label="⛔ BAN USER", style=discord.ButtonStyle.danger, emoji="⛔")
+    @discord.ui.button(label="⛔ BAN USER", style=discord.ButtonStyle.danger, emoji="⛔", custom_id="ban")
     async def ban_user(self, interaction: discord.Interaction, button: discord.ui.Button):
         modal = BanUserModal()
         await interaction.response.send_modal(modal)
     
-    @discord.ui.button(label="📄 TRANSCRIPT", style=discord.ButtonStyle.secondary, emoji="📄")
+    @discord.ui.button(label="📄 TRANSCRIPT", style=discord.ButtonStyle.secondary, emoji="📄", custom_id="transcript")
     async def transcript(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         try:
@@ -1888,7 +1942,7 @@ class TicketControlView(View):
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
     
-    @discord.ui.button(label="🔒 CLOSE TICKET", style=discord.ButtonStyle.danger, emoji="🔒")
+    @discord.ui.button(label="🔒 CLOSE TICKET", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="close")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator and interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ No permission!", ephemeral=True)
@@ -1899,7 +1953,7 @@ class TicketControlView(View):
         await asyncio.sleep(2)
         await channel.delete()
     
-    @discord.ui.button(label="📝 SPECIAL NOTE", style=discord.ButtonStyle.primary, emoji="📝")
+    @discord.ui.button(label="📝 SPECIAL NOTE", style=discord.ButtonStyle.primary, emoji="📝", custom_id="note")
     async def special_note(self, interaction: discord.Interaction, button: discord.ui.Button):
         modal = NoteModal(self.channel_id)
         await interaction.response.send_modal(modal)
@@ -1975,10 +2029,354 @@ class NoteModal(Modal):
         await interaction.channel.send(f"📝 **Special Note Added by {interaction.user.mention}:**\n{self.note_input.value}")
         await interaction.response.send_message("✅ Note saved successfully!", ephemeral=True)
 
+
+# ============ RAILWAY CONTROL API ============
+# The Vercel frontend talks to this private API. The browser never receives the control key.
+CONTROL_API_KEY = os.getenv('CONTROL_API_KEY', '')
+SUPER_ADMIN_ID = str(os.getenv('SUPER_ADMIN_ID', ''))
+web_runner = None
+web_site = None
+
+def _api_authorized(request):
+    return bool(CONTROL_API_KEY) and secrets.compare_digest(request.headers.get('X-API-Key', ''), CONTROL_API_KEY)
+
+def _api_json(payload, status=200):
+    return web.json_response(payload, status=status, headers={'Cache-Control': 'no-store'})
+
+def _guild_or_none(guild_id):
+    try:
+        return bot.get_guild(int(guild_id))
+    except Exception:
+        return None
+
+def _member_can_admin(member):
+    return bool(member and (member.id == getattr(member.guild, 'owner_id', None) or member.guild_permissions.administrator))
+
+def _member_can_moderate(member):
+    return bool(member and (member.guild_permissions.administrator or member.guild_permissions.ban_members or member.guild_permissions.kick_members or member.guild_permissions.moderate_members))
+
+def _serialize_member(member):
+    return {
+        'id': str(member.id), 'username': member.name, 'display_name': member.display_name,
+        'avatar': member.display_avatar.url, 'bot': member.bot,
+        'roles': [{'id': str(r.id), 'name': r.name, 'position': r.position, 'color': r.color.value} for r in member.roles if r.name != '@everyone'],
+        'joined_at': member.joined_at.isoformat() if member.joined_at else None,
+        'is_admin': member.guild_permissions.administrator,
+        'is_owner': member.guild.owner_id == member.id
+    }
+
+def _serialize_guild(guild, actor_id=None):
+    actor = guild.get_member(int(actor_id)) if actor_id and str(actor_id).isdigit() else None
+    return {
+        'id': str(guild.id), 'name': guild.name,
+        'icon': guild.icon.url if guild.icon else None,
+        'banner': guild.banner.url if guild.banner else None,
+        'description': guild.description or '', 'member_count': guild.member_count or 0,
+        'humans': len([m for m in guild.members if not m.bot]), 'bots': len([m for m in guild.members if m.bot]),
+        'channels': len(guild.channels), 'roles': len(guild.roles), 'categories': len(guild.categories),
+        'owner_id': str(guild.owner_id) if guild.owner_id else None,
+        'is_member': bool(actor), 'is_admin': bool(actor and actor.guild_permissions.administrator),
+        'is_owner': bool(actor and actor.id == guild.owner_id),
+        'permissions': actor.guild_permissions.value if actor else 0,
+        'created_at': guild.created_at.isoformat(), 'boost_level': guild.premium_tier,
+        'boost_count': guild.premium_subscription_count or 0
+    }
+
+async def api_health(request):
+    return _api_json({'ok': True, 'status': 'online', 'bot_user': str(bot.user) if bot.user else None, 'guilds': len(bot.guilds)})
+
+async def api_stats(request):
+    commands_count = len(bot.tree.get_commands())
+    members = set(); humans=0; bots_count=0
+    for g in bot.guilds:
+        for m in g.members:
+            members.add(m.id)
+            if m.bot: bots_count += 1
+            else: humans += 1
+    return _api_json({'ok': True, 'stats': {
+        'servers': len(bot.guilds), 'members': sum((g.member_count or 0) for g in bot.guilds),
+        'unique_members': len(members), 'commands': commands_count, 'humans': humans,
+        'bots': bots_count, 'channels': sum(len(g.channels) for g in bot.guilds),
+        'roles': sum(len(g.roles) for g in bot.guilds)
+    }})
+
+async def api_user_guilds(request):
+    if not _api_authorized(request): return _api_json({'error':'unauthorized'}, 401)
+    uid=request.match_info['user_id']
+    result=[]
+    for g in bot.guilds:
+        member=g.get_member(int(uid))
+        if member:
+            result.append(_serialize_guild(g, uid))
+    return _api_json({'ok':True,'guilds':result})
+
+async def api_user_all_guilds(request):
+    if not _api_authorized(request): return _api_json({'error':'unauthorized'},401)
+    uid=request.match_info['user_id']; result=[]
+    if not uid.isdigit(): return _api_json({'error':'invalid_user'},400)
+    for g in bot.guilds:
+        m=g.get_member(int(uid))
+        if m: result.append(_serialize_guild(g,uid) | {'bot_present':True})
+    # OAuth-discovered non-mutual guilds are stored by Vercel; the Railway bot cannot see them.
+    return _api_json({'ok':True,'guilds':result})
+
+async def api_guild(request):
+    if not _api_authorized(request): return _api_json({'error':'unauthorized'}, 401)
+    guild=_guild_or_none(request.match_info['guild_id'])
+    if not guild: return _api_json({'error':'guild_not_found'},404)
+    actor_id=request.query.get('actor_id')
+    actor=guild.get_member(int(actor_id)) if actor_id and actor_id.isdigit() else None
+    data=_serialize_guild(guild, actor_id)
+    full=request.query.get('full') == '1' and (bool(actor and (actor.guild_permissions.administrator or actor.id == guild.owner_id)) or str(actor_id)==SUPER_ADMIN_ID)
+    if full:
+        data['members']=[_serialize_member(m) for m in guild.members if not m.bot]
+    else:
+        data['members']=[]
+    data['roles']=[{'id':str(r.id),'name':r.name,'position':r.position,'color':r.color.value,'managed':r.managed,'members':len(r.members)} for r in guild.roles]
+    data['channels']=[{'id':str(c.id),'name':c.name,'type':str(c.type),'position':c.position,'category_id':str(c.category_id) if c.category_id else None} for c in guild.channels]
+    return _api_json({'ok':True,'guild':data})
+
+async def _actor(request, guild, require='moderator'):
+    aid=str(request.headers.get('X-Actor-ID',''))
+    if not aid.isdigit(): return None, 'invalid_actor'
+    member=guild.get_member(int(aid))
+    if not member: return None, 'actor_not_in_server'
+    if aid == SUPER_ADMIN_ID: return member, None
+    if require=='admin' and not _member_can_admin(member): return None, 'admin_required'
+    if require=='moderator' and not _member_can_moderate(member): return None, 'moderator_required'
+    # 'self' is used for safe profile actions such as updating one's own nickname.
+    if require=='self': return member, None
+    return member, None
+
+async def api_warnings(request):
+    if not _api_authorized(request): return _api_json({'error':'unauthorized'},401)
+    guild=_guild_or_none(request.match_info['guild_id'])
+    if not guild: return _api_json({'error':'guild_not_found'},404)
+    actor,err=await _actor(request,guild,'moderator')
+    if err: return _api_json({'error':err},403)
+    uid=request.match_info['user_id']; data=firebase_get(f'guilds/{guild.id}/warnings/{uid}') or {}
+    return _api_json({'ok':True,'warnings':list(data.values()) if isinstance(data,dict) else []})
+
+async def api_action(request):
+    if not _api_authorized(request): return _api_json({'error':'unauthorized'},401)
+    action=request.match_info['action']
+    try: data=await request.json()
+    except Exception: data={}
+    guild=_guild_or_none(str(data.get('guild_id','')))
+    if not guild: return _api_json({'error':'guild_not_found'},404)
+    actor,err=await _actor(request,guild,'self' if action=='nickname' else 'admin')
+    if err: return _api_json({'error':err},403)
+    reason=str(data.get('reason') or 'Action from Anion control panel')[:500]
+    try:
+        target_id=int(data.get('user_id')) if data.get('user_id') is not None else None
+        if action in {'ban','kick','mute','unmute','warn','nickname','assign_role','unassign_role'}:
+            member=guild.get_member(target_id) if target_id else None
+            if action=='ban':
+                if not actor.guild_permissions.ban_members and actor.id != guild.owner_id and actor.id != int(SUPER_ADMIN_ID or -1): return _api_json({'error':'ban_permission_required'},403)
+                if not member: return _api_json({'error':'member_not_found'},404)
+                await member.ban(reason=reason); result='banned'
+            elif action=='kick':
+                if not actor.guild_permissions.kick_members and actor.id != guild.owner_id and actor.id != int(SUPER_ADMIN_ID or -1): return _api_json({'error':'kick_permission_required'},403)
+                if not member: return _api_json({'error':'member_not_found'},404)
+                await member.kick(reason=reason); result='kicked'
+            elif action in {'mute','unmute'}:
+                if not actor.guild_permissions.moderate_members and actor.id != guild.owner_id and actor.id != int(SUPER_ADMIN_ID or -1): return _api_json({'error':'moderate_permission_required'},403)
+                if not member: return _api_json({'error':'member_not_found'},404)
+                if action=='mute':
+                    minutes=max(1,min(int(data.get('duration',60)),40320)); await member.timeout(timedelta(minutes=minutes),reason=reason); result=f'muted_{minutes}m'
+                else: await member.timeout(None,reason=reason); result='unmuted'
+            elif action=='warn':
+                if not member: return _api_json({'error':'member_not_found'},404)
+                wid=secrets.token_hex(10); now=datetime.now().isoformat()
+                firebase_set(f'guilds/{guild.id}/warnings/{member.id}/{wid}',{'id':wid,'user_id':str(member.id),'moderator_id':str(actor.id),'reason':reason,'created_at':now})
+                result='warned'
+            elif action=='nickname':
+                if not member: return _api_json({'error':'member_not_found'},404)
+                if member.id != actor.id and not actor.guild_permissions.manage_nicknames and actor.id != guild.owner_id and actor.id != int(SUPER_ADMIN_ID or -1): return _api_json({'error':'manage_nicknames_required'},403)
+                if not guild.me.guild_permissions.manage_nicknames: return _api_json({'error':'bot_manage_nicknames_required'},403)
+                nick=data.get('nickname')
+                await member.edit(nick=(str(nick)[:32] if nick else None),reason=reason); result='nickname_updated'
+            else:
+                role=guild.get_role(int(data.get('role_id'))) if data.get('role_id') else None
+                if not member or not role: return _api_json({'error':'member_or_role_not_found'},404)
+                if role.managed or role >= guild.me.top_role: return _api_json({'error':'role_hierarchy'},403)
+                if action=='assign_role': await member.add_roles(role,reason=reason); result='role_assigned'
+                else: await member.remove_roles(role,reason=reason); result='role_removed'
+        elif action in {'unban'}:
+            if not actor.guild_permissions.ban_members: return _api_json({'error':'ban_permission_required'},403)
+            uid=int(data.get('user_id')); await guild.unban(discord.Object(id=uid),reason=reason); result='unbanned'
+        elif action=='mute_all':
+            minutes=max(1,min(int(data.get('duration',60)),40320)); count=0
+            for m in guild.members:
+                if m.bot or m.guild_permissions.administrator: continue
+                try: await m.timeout(timedelta(minutes=minutes),reason=reason); count+=1
+                except (discord.Forbidden,discord.HTTPException): pass
+            result=f'muted_{count}'
+        elif action=='create_role':
+            name=str(data.get('name','New Role'))[:100]; role=await guild.create_role(name=name,color=discord.Color(int(str(data.get('color','5865F2')).replace('#',''),16)),reason=reason); result={'role_id':str(role.id),'name':role.name}
+        elif action=='delete_role':
+            role=guild.get_role(int(data.get('role_id')))
+            if not role or role.managed or role >= guild.me.top_role: return _api_json({'error':'role_hierarchy'},403)
+            await role.delete(reason=reason); result='role_deleted'
+        elif action=='create_channel':
+            name=re.sub(r'[^a-zA-Z0-9_-]+','-',str(data.get('name','new-channel')).lower()).strip('-')[:90] or 'new-channel'
+            typ=str(data.get('type','text')); category=guild.get_channel(int(data['category_id'])) if data.get('category_id') else None
+            ch=await (guild.create_voice_channel(name,category=category,reason=reason) if typ=='voice' else guild.create_text_channel(name,category=category,reason=reason)); result={'channel_id':str(ch.id),'name':ch.name}
+        elif action=='delete_channel':
+            ch=guild.get_channel(int(data.get('channel_id')))
+            if not ch: return _api_json({'error':'channel_not_found'},404)
+            await ch.delete(reason=reason); result='channel_deleted'
+        elif action=='announcement':
+            ch=guild.get_channel(int(data.get('channel_id')))
+            if not isinstance(ch,discord.TextChannel): return _api_json({'error':'text_channel_not_found'},404)
+            if not actor.guild_permissions.manage_messages and actor.id != guild.owner_id and actor.id != int(SUPER_ADMIN_ID or -1): return _api_json({'error':'manage_messages_required'},403)
+            await ch.send(content=str(data.get('message',''))[:2000]); result='announcement_sent'
+        elif action=='dm':
+            if not actor.guild_permissions.administrator and actor.id != guild.owner_id and actor.id != int(SUPER_ADMIN_ID or -1): return _api_json({'error':'admin_required'},403)
+            member=guild.get_member(int(data.get('user_id')));
+            if not member: return _api_json({'error':'member_not_found'},404)
+            await member.send(str(data.get('message',''))[:2000]); result='dm_sent'
+        else: return _api_json({'error':'unknown_action'},400)
+        audit_id=secrets.token_hex(12)
+        firebase_set(f'guilds/{guild.id}/audit/{audit_id}',{'id':audit_id,'action':action,'actor_id':str(actor.id),'target_id':str(target_id) if target_id else None,'payload':data,'result':result if isinstance(result,(str,int,float,bool)) else {'value':str(result)},'timestamp':datetime.now().isoformat()})
+        await save_guild_snapshot(guild)
+        return _api_json({'ok':True,'result':result,'audit_id':audit_id})
+    except ValueError:
+        return _api_json({'error':'invalid_input'},400)
+    except discord.Forbidden:
+        return _api_json({'error':'discord_permission_denied'},403)
+    except discord.HTTPException as exc:
+        return _api_json({'error':f'discord_http_{exc.status}'},502)
+    except Exception as exc:
+        logger.exception('Control API action failed')
+        return _api_json({'error':'server_error','detail':str(exc)[:200]},500)
+
+async def api_verify(request):
+    if not _api_authorized(request): return _api_json({'error':'unauthorized'},401)
+    try: data=await request.json()
+    except Exception: data={}
+    uid=str(data.get('user_id','')); gid=str(data.get('guild_id',''))
+    if not uid.isdigit() or not gid.isdigit(): return _api_json({'error':'invalid_input'},400)
+    guild=_guild_or_none(gid)
+    if not guild: return _api_json({'error':'guild_not_found'},404)
+    member=guild.get_member(int(uid))
+    if not member: return _api_json({'error':'user_not_in_server'},403)
+    try:
+        role=discord.utils.get(guild.roles,name='✅ Verified')
+        if not role:
+            role=await guild.create_role(name='✅ Verified',color=discord.Color.green(),reason='Anion verification')
+        if role >= guild.me.top_role:
+            return _api_json({'error':'verified_role_hierarchy'},403)
+        await member.add_roles(role,reason='Anion Discord OAuth verification')
+        creds=generate_credentials(uid,role='moderator' if member.guild_permissions.administrator else 'member')
+        profile={
+            'discord_id':uid,'username':member.name,'global_name':member.display_name,
+            'avatar':member.display_avatar.url,'email':data.get('email'),'verified':True,
+            'verified_at':datetime.now().isoformat(),'source_guild_id':gid
+        }
+        firebase_set(f'profiles/{uid}',profile)
+        firebase_set(f'guilds/{gid}/verified/{uid}',profile | {'guild_id':gid,'credentials':creds})
+        firebase_set(f'user_guilds/{uid}/{gid}',{'guild_id':gid,'guild_name':guild.name,'guild_icon':guild.icon.url if guild.icon else None,'is_owner':guild.owner_id==member.id,'is_admin':member.guild_permissions.administrator,'permissions':member.guild_permissions.value,'updated_at':datetime.now().isoformat()})
+        await send_credentials_dm(member,creds,creds.get('role'),discord.utils.get(guild.channels,name='🛡️-mod-logs'))
+        return _api_json({'ok':True,'user_id':uid,'guild_id':gid,'credentials_created':True})
+    except discord.Forbidden:
+        return _api_json({'error':'bot_missing_manage_roles'},403)
+    except Exception as exc:
+        logger.exception('Verification API failed')
+        return _api_json({'error':'verification_failed','detail':str(exc)[:200]},500)
+
+async def api_superadmin_guilds(request):
+    if not _api_authorized(request): return _api_json({'error':'unauthorized'},401)
+    aid=str(request.headers.get('X-Actor-ID',''))
+    if aid != SUPER_ADMIN_ID: return _api_json({'error':'superadmin_required'},403)
+    return _api_json({'ok':True,'guilds':[_serialize_guild(g, aid) for g in bot.guilds]})
+
+async def start_control_api():
+    global web_runner, web_site
+    app_web=web.Application(client_max_size=1024*1024)
+    app_web.router.add_get('/api/health',api_health)
+    app_web.router.add_get('/api/v1/stats',api_stats)
+    app_web.router.add_get('/api/v1/user/{user_id}/guilds',api_user_guilds)
+    app_web.router.add_get('/api/v1/user/{user_id}/all-guilds',api_user_all_guilds)
+    app_web.router.add_get('/api/v1/guild/{guild_id}',api_guild)
+    app_web.router.add_get('/api/v1/superadmin/guilds',api_superadmin_guilds)
+    app_web.router.add_post('/api/v1/verify',api_verify)
+    app_web.router.add_post('/api/v1/action/{action}',api_action)
+    app_web.router.add_get('/api/v1/guild/{guild_id}/warnings/{user_id}',api_warnings)
+    web_runner=web.AppRunner(app_web); await web_runner.setup()
+    port=int(os.getenv('PORT','8080'))
+    web_site=web.TCPSite(web_runner,'0.0.0.0',port); await web_site.start()
+    logger.info(f'🌐 Control API listening on :{port}')
+
+@bot.event
+async def setup_hook():
+    # Register persistent views so old Discord messages keep working after Railway restarts.
+    for view in (ModerationView(), ServerManagementView(), QuickActionsView(), VerifyView(), GiveawayMainView(), TicketView()):
+        bot.add_view(view)
+    # Restore dynamic persistent views from local DB state.
+    for gid, gdata in db.data.get('giveaways', {}).items():
+        try:
+            if gdata.get('status','active') != 'active': continue
+            end=datetime.fromisoformat(gdata['end_time'])
+            if end <= datetime.now(): continue
+            bot.add_view(GiveawayParticipateView(gid,end,int(gdata['winners']),int(gdata['host'])), message_id=int(gdata['message_id']) if gdata.get('message_id') else None)
+        except Exception as exc: logger.warning(f'Could not restore giveaway {gid}: {exc}')
+    for cid, tdata in db.data.get('tickets', {}).items():
+        try:
+            channel_id=int(tdata.get('channel_id',cid)); bot.add_view(TicketControlView(int(tdata['user_id']),channel_id))
+        except Exception as exc: logger.warning(f'Could not restore ticket {cid}: {exc}')
+    try:
+        await bot.tree.sync()
+        logger.info('✅ Slash commands synced')
+    except Exception as exc: logger.error(f'Slash sync failed: {exc}')
+    if CONTROL_API_KEY:
+        await start_control_api()
+    else:
+        logger.warning('⚠️ CONTROL_API_KEY missing; control API disabled')
+
+@bot.event
+async def on_ready():
+    logger.info(f'🤖 Logged in as {bot.user} ({bot.user.id}) | {len(bot.guilds)} guilds')
+    for guild in bot.guilds:
+        try:
+            await save_guild_snapshot(guild)
+        except Exception: pass
+
+async def save_guild_snapshot(guild):
+    config={'id':str(guild.id),'name':guild.name,'owner_id':str(guild.owner_id) if guild.owner_id else None,'owner_name':str(guild.owner) if guild.owner else 'Unknown','created_at':guild.created_at.isoformat(),'member_count':guild.member_count or 0,'human_count':len([m for m in guild.members if not m.bot]),'bot_count':len([m for m in guild.members if m.bot]),'channel_count':len(guild.channels),'role_count':len(guild.roles),'category_count':len(guild.categories),'boost_count':guild.premium_subscription_count or 0,'boost_level':guild.premium_tier,'description':guild.description or '','icon_url':guild.icon.url if guild.icon else None,'updated_at':datetime.now().isoformat()}
+    firebase_set(f'guilds/{guild.id}/config',config)
+
+@bot.event
+async def on_guild_join(guild):
+    await save_guild_snapshot(guild)
+
+@bot.event
+async def on_guild_remove(guild):
+    firebase_set(f'guilds/{guild.id}/config/removed_at',datetime.now().isoformat())
+
+@bot.event
+async def on_member_join(member):
+    await process_single_member(member)
+    await save_guild_snapshot(member.guild)
+
+@bot.event
+async def on_member_remove(member):
+    uid=str(member.id); gid=str(member.guild.id)
+    firebase_delete(f'user_guilds/{uid}/{gid}')
+    firebase_delete(f'guilds/{gid}/verified/{uid}')
+    firebase_delete(f'guilds/{gid}/unverified/{uid}')
+    await save_guild_snapshot(member.guild)
+
+@bot.event
+async def on_member_update(before, after):
+    await process_single_member(after)
+
 # ============ SLASH COMMANDS ============
 @bot.tree.command(name="setup", description="Setup all systems (Admin only)")
 @app_commands.default_permissions(administrator=True)
 async def slash_setup(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator and interaction.user.id != interaction.guild.owner_id:
+        await interaction.response.send_message('❌ Administrator permission required.', ephemeral=True); return
     view = SetupView(interaction.user)
     embed = discord.Embed(
         title="🤖 **EDITH - ULTIMATE SERVER MANAGEMENT BOT**",
@@ -1999,6 +2397,8 @@ async def slash_setup(interaction: discord.Interaction):
 @bot.tree.command(name="sync", description="Sync server members and generate credentials")
 @app_commands.default_permissions(administrator=True)
 async def sync_command(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator and interaction.user.id != interaction.guild.owner_id:
+        await interaction.response.send_message('❌ Administrator permission required.', ephemeral=True); return
     await interaction.response.send_message("🔄 **Syncing members...**", ephemeral=True)
     
     log_channel = discord.utils.get(interaction.guild.channels, name="🛡️-mod-logs")
@@ -2034,6 +2434,8 @@ async def get_credentials_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="get_creds", description="Get credentials for a user (Admin only)")
 @app_commands.default_permissions(administrator=True)
 async def get_user_creds(interaction: discord.Interaction, user: discord.Member):
+    if not interaction.user.guild_permissions.administrator and interaction.user.id != interaction.guild.owner_id:
+        await interaction.response.send_message('❌ Administrator permission required.', ephemeral=True); return
     creds = get_credentials(str(user.id))
     
     if not creds:
@@ -2054,6 +2456,8 @@ async def get_user_creds(interaction: discord.Interaction, user: discord.Member)
 @bot.tree.command(name="reset_creds", description="Reset credentials for a user (Admin only)")
 @app_commands.default_permissions(administrator=True)
 async def reset_user_creds(interaction: discord.Interaction, user: discord.Member):
+    if not interaction.user.guild_permissions.administrator and interaction.user.id != interaction.guild.owner_id:
+        await interaction.response.send_message('❌ Administrator permission required.', ephemeral=True); return
     verified_role = discord.utils.get(interaction.guild.roles, name="✅ Verified")
     if verified_role not in user.roles:
         await interaction.response.send_message(f"❌ {user.mention} is not verified! Only verified users get credentials.", ephemeral=True)
