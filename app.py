@@ -91,68 +91,6 @@ else:
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# ============ DATABASE ============
-class Database:
-    def __init__(self):
-        self.data = {}
-        self.load_data()
-    
-    def load_data(self):
-        try:
-            if os.path.exists('./data/db.json'):
-                with open('./data/db.json', 'r') as f:
-                    self.data = json.load(f)
-            else:
-                self.data = {'users': {}, 'guilds': {}, 'giveaways': {}, 'tickets': {}, 'notes': {}, 'oauth_states': {}}
-                self.save_data()
-        except:
-            self.data = {'users': {}, 'guilds': {}, 'giveaways': {}, 'tickets': {}, 'notes': {}, 'oauth_states': {}}
-            self.save_data()
-    
-    def save_data(self):
-        try:
-            os.makedirs('./data', exist_ok=True)
-            with open('./data/db.json', 'w') as f:
-                json.dump(self.data, f, indent=2)
-        except:
-            pass
-    
-    def get_user(self, user_id, guild_id):
-        user_id = str(user_id)
-        guild_id = str(guild_id)
-        if guild_id not in self.data['users']:
-            self.data['users'][guild_id] = {}
-        if user_id not in self.data['users'][guild_id]:
-            self.data['users'][guild_id][user_id] = {
-                'verified': False,
-                'profile': {},
-                'tickets': [],
-                'notes': [],
-                'guild_id': guild_id,
-                'user_id': user_id,
-                'verified_at': None
-            }
-            self.save_data()
-        return self.data['users'][guild_id][user_id]
-    
-    def set_user(self, user_id, guild_id, data):
-        user_id = str(user_id)
-        guild_id = str(guild_id)
-        if guild_id not in self.data['users']:
-            self.data['users'][guild_id] = {}
-        self.data['users'][guild_id][user_id] = data
-        self.save_data()
-    
-    def get_guild(self, guild_id):
-        return self.data['guilds'].get(str(guild_id))
-    
-    def set_guild(self, guild_id, data):
-        self.data['guilds'][str(guild_id)] = data
-        self.save_data()
-
-db = Database()
-oauth_states = {}
-
 # ============ FIREBASE HELPER FUNCTIONS ============
 def firebase_set(path, data):
     if rtdb_client:
@@ -180,6 +118,84 @@ def firebase_delete(path):
         except Exception as e:
             return False
     return False
+
+
+# ============ DATABASE (FIREBASE-BACKED) ============
+class Database:
+    """Persistent application database. Firebase is the source of truth.
+
+    A tiny in-memory copy is kept only as a runtime cache so existing code can
+    continue using db.data without changing the whole bot. Persistent writes
+    are mirrored to Firebase under application_data.
+    """
+    DEFAULTS = {'users': {}, 'guilds': {}, 'giveaways': {}, 'tickets': {}, 'notes': {}, 'oauth_states': {}}
+
+    def __init__(self):
+        self.data = {}
+        self.load_data()
+
+    def load_data(self):
+        firebase_data = firebase_get('application_data')
+        if isinstance(firebase_data, dict):
+            self.data = firebase_data
+            for key, value in self.DEFAULTS.items():
+                self.data.setdefault(key, value.copy() if isinstance(value, dict) else value)
+            logger.info('☁️ Application database loaded from Firebase')
+            return
+
+        # One-time migration for any old Railway local db.json.
+        try:
+            if os.path.exists('./data/db.json'):
+                with open('./data/db.json', 'r', encoding='utf-8') as f:
+                    self.data = json.load(f)
+                logger.info('📦 Migrating existing local database to Firebase...')
+            else:
+                self.data = json.loads(json.dumps(self.DEFAULTS))
+        except Exception:
+            self.data = json.loads(json.dumps(self.DEFAULTS))
+
+        self.save_data()
+
+    def save_data(self):
+        # Firebase is the persistent source of truth. No application data is
+        # required to survive on Railway's ephemeral filesystem.
+        if rtdb_client:
+            try:
+                rtdb_client.child('application_data').set(self.data)
+                logger.debug('☁️ Application database saved to Firebase')
+                return True
+            except Exception as e:
+                logger.error(f'❌ Firebase database save failed: {e}')
+                return False
+        logger.error('❌ Firebase unavailable: application data was NOT persisted')
+        return False
+
+    def get_user(self, user_id, guild_id):
+        user_id = str(user_id)
+        guild_id = str(guild_id)
+        if guild_id not in self.data['users']:
+            self.data['users'][guild_id] = {}
+        if user_id not in self.data['users'][guild_id]:
+            self.data['users'][guild_id][user_id] = {
+                'verified': False, 'profile': {}, 'tickets': [], 'notes': [],
+                'guild_id': guild_id, 'user_id': user_id, 'verified_at': None
+            }
+            self.save_data()
+        return self.data['users'][guild_id][user_id]
+
+    def set_user(self, user_id, guild_id, data):
+        user_id = str(user_id); guild_id = str(guild_id)
+        self.data.setdefault('users', {}).setdefault(guild_id, {})[user_id] = data
+        self.save_data()
+
+    def get_guild(self, guild_id):
+        return self.data.get('guilds', {}).get(str(guild_id))
+
+    def set_guild(self, guild_id, data):
+        self.data.setdefault('guilds', {})[str(guild_id)] = data
+        self.save_data()
+
+db = Database()
 
 def generate_credentials(user_id, username=None, role='member'):
     user_id = str(user_id)
@@ -1593,12 +1609,6 @@ class OAuthVerification:
     
     def generate_oauth_url(self, user_id, guild_id):
         state = secrets.token_urlsafe(32)
-        oauth_states[state] = {
-            'user_id': user_id,
-            'guild_id': guild_id,
-            'timestamp': datetime.now().isoformat()
-        }
-        
         if rtdb_client:
             try:
                 rtdb_client.child(f'oauth_states/{state}').set({
