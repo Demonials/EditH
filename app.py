@@ -2278,6 +2278,10 @@ async def api_verify(request):
         if role >= guild.me.top_role:
             return _api_json({'error':'verified_role_hierarchy'},403)
         await member.add_roles(role,reason='Anion Discord OAuth verification')
+        # Verify Discord actually reflected the role before reporting success.
+        member = guild.get_member(int(uid)) or member
+        if role not in member.roles:
+            return _api_json({'error':'role_assignment_not_reflected'},502)
         creds=generate_credentials(uid,role='moderator' if member.guild_permissions.administrator else 'member')
         profile={
             'discord_id':uid,'username':member.name,'global_name':member.display_name,
@@ -2287,8 +2291,9 @@ async def api_verify(request):
         firebase_set(f'profiles/{uid}',profile)
         firebase_set(f'guilds/{gid}/verified/{uid}',profile | {'guild_id':gid,'credentials':creds})
         firebase_set(f'user_guilds/{uid}/{gid}',{'guild_id':gid,'guild_name':guild.name,'guild_icon':guild.icon.url if guild.icon else None,'is_owner':guild.owner_id==member.id,'is_admin':member.guild_permissions.administrator,'permissions':member.guild_permissions.value,'updated_at':datetime.now().isoformat()})
-        await send_credentials_dm(member,creds,creds.get('role'),discord.utils.get(guild.channels,name='🛡️-mod-logs'))
-        return _api_json({'ok':True,'user_id':uid,'guild_id':gid,'credentials_created':True})
+        dm_sent = await send_credentials_dm(member,creds,creds.get('role'),discord.utils.get(guild.channels,name='🛡️-mod-logs'))
+        firebase_set(f'profiles/{uid}/verification', {'role_assigned': True, 'dm_sent': bool(dm_sent), 'last_verified_at': datetime.now().isoformat()})
+        return _api_json({'ok':True,'user_id':uid,'guild_id':gid,'credentials_created':True,'role_assigned':True,'dm_sent':bool(dm_sent)})
     except discord.Forbidden:
         return _api_json({'error':'bot_missing_manage_roles'},403)
     except Exception as exc:
