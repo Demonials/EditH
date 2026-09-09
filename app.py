@@ -694,7 +694,7 @@ class ServerManagementView(View):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
-    @discord.ui.button(label="⚡ QUICK ACTIONS", style=discord.ButtonStyle.success, emoji="⚡", row=1)
+    @discord.ui.button(label="⚡ QUICK ACTIONS", style=discord.ButtonStyle.success, emoji="⚡", row=1, custom_id="edith:server:quick_actions")
     async def quick_actions(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Only admins can use this!", ephemeral=True)
