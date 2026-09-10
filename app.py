@@ -2563,16 +2563,6 @@ async def api_verify(request):
                 'updated_at': now
             },
             f'guilds/{gid}/unverified/{uid}': None,
-            f'guilds/{gid}/verified/{uid}/verification_status': {
-                'role_created': result['role_created'],
-                'role_assigned': result['role_assigned'],
-                'credentials_created': result['credentials_created'],
-                'firebase_saved': True,
-                'dm_sent': False,
-                'collection_channel_sent': False,
-                'log_sent': False,
-                'updated_at': now
-            }
         }
 
         if not firebase_update(firebase_updates):
