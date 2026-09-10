@@ -2278,20 +2278,37 @@ async def api_verify(request):
         if role >= guild.me.top_role:
             return _api_json({'error':'verified_role_hierarchy'},403)
         await member.add_roles(role,reason='Anion Discord OAuth verification')
-        # Verify Discord actually reflected the role before reporting success.
+        # Refresh the member object and refuse to report success unless Discord actually
+        # shows the Verified role.
         member = guild.get_member(int(uid)) or member
         if role not in member.roles:
             return _api_json({'error':'role_assignment_not_reflected'},502)
-        creds=generate_credentials(uid,role='moderator' if member.guild_permissions.administrator else 'member')
+
+        is_admin = bool(member.guild_permissions.administrator)
+        role_type = 'moderator' if is_admin else 'member'
+        creds=generate_credentials(uid,role=role_type)
+
+        # Firebase is deliberately kept guild-scoped for verification state: a verified
+        # member is removed from THIS guild's unverified collection and added to its
+        # verified collection.
+        firebase_delete(f'guilds/{gid}/unverified/{uid}')
         profile={
             'discord_id':uid,'username':member.name,'global_name':member.display_name,
             'avatar':member.display_avatar.url,'email':data.get('email'),'verified':True,
             'verified_at':datetime.now().isoformat(),'source_guild_id':gid
         }
         firebase_set(f'profiles/{uid}',profile)
-        firebase_set(f'guilds/{gid}/verified/{uid}',profile | {'guild_id':gid,'credentials':creds})
-        firebase_set(f'user_guilds/{uid}/{gid}',{'guild_id':gid,'guild_name':guild.name,'guild_icon':guild.icon.url if guild.icon else None,'is_owner':guild.owner_id==member.id,'is_admin':member.guild_permissions.administrator,'permissions':member.guild_permissions.value,'updated_at':datetime.now().isoformat()})
-        dm_sent = await send_credentials_dm(member,creds,creds.get('role'),discord.utils.get(guild.channels,name='🛡️-mod-logs'))
+        firebase_set(f'guilds/{gid}/verified/{uid}',profile | {
+            'guild_id':gid,
+            'credentials':creds,
+            'status':'verified',
+            'is_admin':is_admin
+        })
+        firebase_set(f'user_guilds/{uid}/{gid}',{'guild_id':gid,'guild_name':guild.name,'guild_icon':guild.icon.url if guild.icon else None,'is_owner':guild.owner_id==member.id,'is_admin':is_admin,'permissions':member.guild_permissions.value,'updated_at':datetime.now().isoformat()})
+        # Ensure the reverse credential index is always present.
+        if creds.get('username'):
+            firebase_set(f"credentials_by_username/{creds['username']}", {'user_id':uid,'updated_at':datetime.now().isoformat()})
+        dm_sent = await send_credentials_dm(member,creds,role_type,discord.utils.get(guild.channels,name='🛡️-mod-logs'))
         firebase_set(f'profiles/{uid}/verification', {'role_assigned': True, 'dm_sent': bool(dm_sent), 'last_verified_at': datetime.now().isoformat()})
         return _api_json({'ok':True,'user_id':uid,'guild_id':gid,'credentials_created':True,'role_assigned':True,'dm_sent':bool(dm_sent)})
     except discord.Forbidden:
