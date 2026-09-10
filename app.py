@@ -102,6 +102,20 @@ def firebase_set(path, data):
             return False
     return False
 
+def firebase_update(updates):
+    """Apply multiple RTDB writes in one operation.
+    Returns False instead of pretending the write succeeded.
+    """
+    if not rtdb_client:
+        logger.error('[VERIFY] Firebase unavailable')
+        return False
+    try:
+        rtdb_client.update(updates)
+        return True
+    except Exception as e:
+        logger.error(f'Firebase multi-location update failed: {e}')
+        return False
+
 def firebase_get(path):
     if rtdb_client:
         try:
@@ -263,46 +277,39 @@ sent_credentials_cache = {}
 async def send_credentials_dm(member, creds, role=None, log_channel=None):
     if not creds:
         return False
-    
+
     user_id = str(member.id)
-    
-    if user_id in sent_credentials_cache:
-        last_sent = sent_credentials_cache[user_id]
-        if (datetime.now() - last_sent).seconds < 60:
-            return True
-    
     role = role or creds.get('role', 'member')
-    
+
     embed = discord.Embed(
-        title="🔐 **YOUR EDITH LOGIN CREDENTIALS**",
+        title="🔐 YOUR EDITH LOGIN CREDENTIALS",
         description=f"Welcome to **{member.guild.name}**!",
         color=discord.Color.gold()
     )
     embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="📝 USERNAME", value=f"`{creds['username']}`", inline=True)
-    embed.add_field(name="🔑 PASSWORD", value=f"`{creds['password']}`", inline=True)
-    embed.add_field(name="🎭 ROLE", value=f"`{role.upper()}`", inline=True)
-    embed.add_field(name="🌐 LOGIN URL", value=f"[Click Here]({os.getenv('WEBSITE_URL', 'https://edith-bot-api.vercel.app')})", inline=False)
-    embed.set_footer(text="⚠️ Keep these safe! You cannot reset your password.")
-    
+    embed.add_field(name="USERNAME", value=f"`{creds['cr_user']}`", inline=True)
+    embed.add_field(name="PASSWORD", value=f"`{creds['cr_password']}`", inline=True)
+    embed.add_field(name="ROLE", value=f"`{role.upper()}`", inline=True)
+    embed.add_field(
+        name="LOGIN URL",
+        value=f"[Open EditH Control Center]({os.getenv('WEBSITE_URL', 'https://edith-bot-api.vercel.app')})",
+        inline=False
+    )
+    embed.set_footer(text="Keep these credentials private.")
+
     try:
         await member.send(embed=embed)
-        logger.info(f"✅ Credentials sent to {member.name}")
         sent_credentials_cache[user_id] = datetime.now()
-        
-        if log_channel:
-            log_embed = discord.Embed(
-                title="🔐 CREDENTIALS SENT",
-                description=f"Credentials sent to {member.mention}",
-                color=discord.Color.green()
-            )
-            log_embed.add_field(name="Username", value=f"`{creds['username']}`", inline=True)
-            log_embed.add_field(name="Role", value=f"`{role.upper()}`", inline=True)
-            await log_channel.send(content="@everyone", embed=log_embed)
-        
+        logger.info(f'[VERIFY] DM OK user={user_id}')
         return True
     except discord.Forbidden:
-        logger.warning(f"❌ Cannot DM {member.name}")
+        logger.warning(f'[VERIFY] DM FAILED user={user_id} reason=discord_forbidden')
+        return False
+    except discord.HTTPException as exc:
+        logger.warning(f'[VERIFY] DM FAILED user={user_id} reason=http_{exc.status}')
+        return False
+    except Exception as exc:
+        logger.exception(f'[VERIFY] DM FAILED user={user_id}: {exc}')
         return False
 
 async def process_single_member(member, log_channel=None):
@@ -1669,23 +1676,9 @@ class VerifyView(View):
             await interaction.response.send_message("✅ You are already verified!", ephemeral=True)
             return
 
-        # Preflight the role: if the server does not have a Verified role,
-        # create it now. The role is still only assigned after OAuth succeeds.
-        try:
-            role = await ensure_verified_role(interaction.guild)
-            if interaction.guild.me is None or role >= interaction.guild.me.top_role:
-                await interaction.response.send_message(
-                    "❌ I cannot manage the ✅ Verified role. Move my bot role above it and try again.",
-                    ephemeral=True
-                )
-                return
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                "❌ I need Manage Roles permission to create/use the ✅ Verified role.",
-                ephemeral=True
-            )
-            return
-
+        # Do not mutate Discord here. The OAuth callback makes one request to
+        # /api/v1/verify, where the Railway verification pipeline performs
+        # role creation/assignment and all subsequent steps atomically in order.
         url, state = oauth.generate_oauth_url(user_id, guild_id)
         
         view = View()
@@ -2377,125 +2370,299 @@ async def send_verification_log(guild, member, role, creds, dm_sent, collection_
 
 
 async def api_verify(request):
+    """Perform the complete Discord verification pipeline.
+
+    This endpoint is intentionally one-shot: Vercel calls it once after OAuth.
+    Every stage is represented in the returned `steps` array so the web UI can
+    show the real outcome instead of a generic success/failure message.
+    """
     if not _api_authorized(request):
-        logger.warning('❌ Verification API rejected: bad/missing CONTROL_API_KEY')
+        logger.warning('[VERIFY] REJECT unauthorized')
         return _api_json({'ok': False, 'error': 'unauthorized'}, 401)
+
     try:
         data = await request.json()
     except Exception:
         data = {}
 
-    uid, gid = str(data.get('user_id','')), str(data.get('guild_id',''))
-    logger.info(f'🔔 VERIFY REQUEST | user={uid} | guild={gid}')
+    uid, gid = str(data.get('user_id', '')), str(data.get('guild_id', ''))
+    logger.info(f'[VERIFY] START user={uid} guild={gid}')
+
+    result = {
+        'ok': False,
+        'user_id': uid,
+        'guild_id': gid,
+        'role_created': False,
+        'role_assigned': False,
+        'credentials_created': False,
+        'firebase_saved': False,
+        'dm_sent': False,
+        'collection_channel_sent': False,
+        'log_sent': False,
+        'steps': []
+    }
+
+    def step(key, label, ok, detail):
+        result['steps'].append({
+            'key': key, 'label': label, 'ok': bool(ok), 'detail': str(detail)
+        })
+        logger.info(f"[VERIFY] {key.upper()} {'OK' if ok else 'FAILED'} | {detail}")
+
     if not uid.isdigit() or not gid.isdigit():
-        return _api_json({'ok': False, 'error': 'invalid_input'}, 400)
+        step('input', 'Verification request', False, 'Invalid Discord user_id or guild_id')
+        result.update(error='invalid_input', detail='user_id and guild_id must be numeric Discord IDs')
+        return _api_json(result, 400)
+
+    if not rtdb_client:
+        step('firebase', 'Firebase user', False, 'Firebase is not connected')
+        result.update(error='firebase_unavailable', detail='Railway Firebase connection is unavailable')
+        return _api_json(result, 503)
 
     guild = _guild_or_none(gid)
     if not guild:
-        logger.error(f'❌ VERIFY FAILED | guild {gid} not found in bot cache')
-        return _api_json({'ok': False, 'error': 'guild_not_found'}, 404)
+        step('server_membership', 'Server membership', False, f'Bot is not currently in guild {gid}')
+        result.update(error='guild_not_found', detail='EditH is not in the requested Discord server')
+        return _api_json(result, 404)
 
     try:
         member = guild.get_member(int(uid)) or await guild.fetch_member(int(uid))
     except discord.NotFound:
         member = None
-    except Exception as exc:
-        logger.exception(f'❌ Could not fetch member {uid}: {exc}')
+    except discord.HTTPException as exc:
+        logger.exception(f'[VERIFY] MEMBER_CHECK FAILED user={uid}: {exc}')
         member = None
-    if not member:
-        logger.error(f'❌ VERIFY FAILED | user {uid} is not in guild {gid}')
-        return _api_json({'ok': False, 'error': 'user_not_in_server'}, 403)
 
-    result = {
-        'ok': False, 'user_id': uid, 'guild_id': gid,
-        'role_created': False, 'role_assigned': False,
-        'credentials_created': False, 'firebase_saved': False,
-        'dm_sent': False, 'collection_channel_sent': False,
-        'log_sent': False
-    }
+    if not member or member.bot:
+        detail = 'Discord user is not a member of the requested server'
+        if member and member.bot:
+            detail = 'Bot accounts cannot use EditH verification'
+        step('server_membership', 'Server membership', False, detail)
+        result.update(error='user_not_in_server', detail=detail)
+        return _api_json(result, 403)
+
+    step('server_membership', 'Server membership', True, f'Member confirmed in {guild.name}')
+    logger.info('[VERIFY] MEMBER_CHECK OK')
+
     try:
         me = guild.me or await guild.fetch_member(bot.user.id)
+        if not me:
+            step('verified_role', 'Verified role', False, 'Could not resolve the bot member')
+            result.update(error='bot_member_not_found', detail='Could not resolve EditH in the server')
+            return _api_json(result, 503)
+
         if not me.guild_permissions.manage_roles:
-            raise PermissionError('Bot needs Manage Roles permission')
+            step('verified_role', 'Verified role', False, 'Bot needs Manage Roles permission')
+            result.update(error='bot_missing_manage_roles', detail='Grant EditH Manage Roles permission')
+            return _api_json(result, 403)
 
         role = discord.utils.get(guild.roles, name='✅ Verified')
         if role is None:
-            role = await guild.create_role(name='✅ Verified', color=discord.Color.green(), reason='EditH verification role')
+            logger.info('[VERIFY] ROLE_CHECK MISSING')
+            role = await guild.create_role(
+                name='✅ Verified',
+                color=discord.Color.green(),
+                reason='EditH verification role'
+            )
             result['role_created'] = True
-            logger.info(f'🎭 VERIFIED ROLE CREATED | guild={gid} | role={role.id}')
+            logger.info(f'[VERIFY] ROLE_CREATE OK role={role.id}')
+            role_detail = f'Created role {role.id}'
         else:
-            logger.info(f'🎭 VERIFIED ROLE FOUND | guild={gid} | role={role.id}')
+            logger.info(f'[VERIFY] ROLE_CHECK FOUND role={role.id}')
+            role_detail = f'Existing role {role.id}'
 
-        if role.managed or role >= me.top_role:
-            logger.error(f'❌ ROLE HIERARCHY | bot_top={me.top_role.position} | verified={role.position}')
-            return _api_json({**result, 'error': 'verified_role_hierarchy', 'detail': 'Move the bot role above ✅ Verified'}, 403)
+        if role.managed:
+            step('verified_role', 'Verified role', False, 'The existing Verified role is managed by Discord/integration and cannot be assigned')
+            result.update(error='verified_role_managed', detail='The ✅ Verified role is managed and cannot be controlled by EditH')
+            return _api_json(result, 403)
+
+        if role >= me.top_role:
+            detail = f'Bot top role position {me.top_role.position} is not above Verified role position {role.position}'
+            logger.error(f'[VERIFY] ROLE_ASSIGN FAILED reason={detail}')
+            step('verified_role', 'Verified role', False, detail)
+            result.update(error='verified_role_hierarchy', detail='Move the EditH bot role above ✅ Verified')
+            return _api_json(result, 403)
 
         if role not in member.roles:
             await member.add_roles(role, reason='EditH Discord OAuth verification')
-        await asyncio.sleep(0.2)
-        member = guild.get_member(int(uid)) or await guild.fetch_member(int(uid))
-        result['role_assigned'] = role.id in [r.id for r in member.roles]
-        logger.info(f"{'✅' if result['role_assigned'] else '❌'} ROLE ASSIGNMENT | user={uid} | role={role.id}")
-        if not result['role_assigned']:
-            return _api_json({**result, 'error': 'role_assignment_failed'}, 502)
+
+        # Re-fetch the member so the response reflects Discord, not the local cache.
+        member = await guild.fetch_member(int(uid))
+        assigned = any(r.id == role.id for r in member.roles)
+        result['role_assigned'] = assigned
+
+        if not assigned:
+            step('verified_role', 'Verified role', False, f'Role {role.id} was not present after assignment')
+            result.update(error='role_assignment_failed', detail='Discord did not confirm the Verified role assignment')
+            return _api_json(result, 502)
+
+        step(
+            'verified_role',
+            'Verified role',
+            True,
+            f"{'Created and assigned' if result['role_created'] else 'Found and assigned'} role {role.id}"
+        )
 
         is_admin = bool(member.guild_permissions.administrator)
         role_type = 'moderator' if is_admin else 'member'
-        creds = generate_credentials(uid, role=role_type)
-        result['credentials_created'] = True
+
+        # Generate credentials before writing the verified record. Existing
+        # credentials are safely reused for repeat verification.
+        existing_creds = get_credentials(uid)
+        creds_were_existing = bool(
+            isinstance(existing_creds, dict)
+            and existing_creds.get('cr_user')
+            and existing_creds.get('cr_password')
+        )
+        try:
+            creds = generate_credentials(uid, role=role_type)
+            result['credentials_created'] = not creds_were_existing
+            step(
+                'credentials',
+                'Credentials',
+                True,
+                'Created new cr_user/cr_password' if not creds_were_existing else 'Existing cr_user/cr_password reused'
+            )
+        except Exception as exc:
+            step('credentials', 'Credentials', False, str(exc)[:500])
+            result.update(error='credential_generation_failed', detail=str(exc)[:500])
+            return _api_json(result, 500)
 
         now = datetime.now().isoformat()
         user_record = {
-            'discord_id': uid, 'username': member.name, 'global_name': member.display_name,
-            'email': data.get('email'), 'avatar': data.get('avatar') or member.display_avatar.url,
-            'guild_id': gid, 'guild_name': guild.name, 'verified': True,
-            'verified_at': now, 'status': 'verified', 'is_admin': is_admin,
-            'verified_role_id': str(role.id), 'verified_role_name': role.name,
-            'role_assigned': True, 'cr_user': creds['cr_user'], 'cr_password': creds['cr_password']
+            'discord_id': uid,
+            'username': member.name,
+            'global_name': member.display_name,
+            'email': data.get('email'),
+            'avatar': data.get('avatar') or member.display_avatar.url,
+            'guild_id': gid,
+            'guild_name': guild.name,
+            'verified': True,
+            'verified_at': now,
+            'status': 'verified',
+            'is_admin': is_admin,
+            'verified_role_id': str(role.id),
+            'verified_role_name': role.name,
+            'role_assigned': True,
+            'cr_user': creds['cr_user'],
+            'cr_password': creds['cr_password']
         }
-        firebase_set(f'guilds/{gid}/verified/{uid}', user_record)
-        firebase_set(f'all_users/{uid}', {**user_record, 'updated_at': now})
-        firebase_set(f'profiles/{uid}', {**user_record, 'updated_at': now})
-        firebase_set(f'user_guilds/{uid}/{gid}', {
-            'guild_id': gid, 'guild_name': guild.name, 'guild_icon': guild.icon.url if guild.icon else None,
-            'is_owner': guild.owner_id == member.id, 'is_admin': is_admin,
-            'permissions': member.guild_permissions.value, 'verified': True,
-            'verified_role_id': str(role.id), 'updated_at': now
-        })
-        firebase_set(f'guilds/{gid}/unverified/{uid}', None)
-        result['firebase_saved'] = True
-        logger.info(f'☁️ FIREBASE SAVED | user={uid} | guild={gid} | cr_user={creds["cr_user"]}')
 
-        dm_sent = await send_credentials_dm(member, creds, role_type, discord.utils.get(guild.text_channels, name='🛡️-mod-logs'))
+        firebase_updates = {
+            f'guilds/{gid}/verified/{uid}': user_record,
+            f'all_users/{uid}': {**user_record, 'updated_at': now},
+            f'profiles/{uid}': {**user_record, 'updated_at': now},
+            f'user_guilds/{uid}/{gid}': {
+                'guild_id': gid,
+                'guild_name': guild.name,
+                'guild_icon': guild.icon.url if guild.icon else None,
+                'is_owner': guild.owner_id == member.id,
+                'is_admin': is_admin,
+                'permissions': member.guild_permissions.value,
+                'verified': True,
+                'verified_role_id': str(role.id),
+                'updated_at': now
+            },
+            f'guilds/{gid}/unverified/{uid}': None,
+            f'guilds/{gid}/verified/{uid}/verification_status': {
+                'role_created': result['role_created'],
+                'role_assigned': result['role_assigned'],
+                'credentials_created': result['credentials_created'],
+                'firebase_saved': True,
+                'dm_sent': False,
+                'collection_channel_sent': False,
+                'log_sent': False,
+                'updated_at': now
+            }
+        }
+
+        if not firebase_update(firebase_updates):
+            step('firebase', 'Firebase user', False, 'Atomic verification record write failed')
+            result.update(error='firebase_write_failed', detail='Firebase rejected the verification record write')
+            return _api_json(result, 502)
+
+        result['firebase_saved'] = True
+        step('firebase', 'Firebase user', True, 'Verified user, credentials references and server membership saved')
+
+        dm_sent = await send_credentials_dm(member, creds, role_type)
         result['dm_sent'] = bool(dm_sent)
+        step('dm', 'DM', result['dm_sent'], 'Credentials DM sent to the Discord user' if dm_sent else 'Discord rejected the DM (privacy settings or blocked DMs)')
+
         collection_sent = await send_credentials_to_collection_channel(member, creds, gid)
         result['collection_channel_sent'] = bool(collection_sent)
-        result['log_sent'] = bool(await send_verification_log(guild, member, role, creds, dm_sent, collection_sent))
+        step(
+            'collection_channel',
+            'Collection channel',
+            result['collection_channel_sent'],
+            'Credential record sent to the collection channel' if collection_sent else 'Credential collection channel was unavailable or message failed'
+        )
 
-        firebase_set(f'guilds/{gid}/verified/{uid}/verification_status', {
-            'role_created': result['role_created'], 'role_assigned': result['role_assigned'],
-            'credentials_created': result['credentials_created'], 'firebase_saved': result['firebase_saved'],
-            'dm_sent': result['dm_sent'], 'collection_channel_sent': result['collection_channel_sent'],
-            'log_sent': result['log_sent'], 'updated_at': now
+        log_sent = await send_verification_log(guild, member, role, creds, dm_sent, collection_sent)
+        result['log_sent'] = bool(log_sent)
+        step(
+            'server_log',
+            'Server log',
+            result['log_sent'],
+            'Verification log sent to the source server' if log_sent else 'No usable verification log channel or Discord rejected the message'
+        )
+
+        # Update only the delivery status after the core verification record is
+        # safely stored. Delivery failures are visible and do not fake success.
+        firebase_update({
+            f'guilds/{gid}/verified/{uid}/verification_status': {
+                'role_created': result['role_created'],
+                'role_assigned': result['role_assigned'],
+                'credentials_created': result['credentials_created'],
+                'firebase_saved': result['firebase_saved'],
+                'dm_sent': result['dm_sent'],
+                'collection_channel_sent': result['collection_channel_sent'],
+                'log_sent': result['log_sent'],
+                'updated_at': now
+            }
         })
+
+        # Core verification is successful once Discord role assignment,
+        # credentials and Firebase persistence succeeded. Delivery failures
+        # remain explicitly visible in the returned step list.
         result['ok'] = True
-        logger.info(f'🎉 VERIFY COMPLETE | user={uid} | guild={gid} | role={result["role_assigned"]} | dm={result["dm_sent"]} | collection={result["collection_channel_sent"]}')
+        result['detail'] = (
+            'Verification completed. Review the individual delivery statuses below.'
+            if not (dm_sent and collection_sent and log_sent)
+            else 'Verification completed successfully.'
+        )
+        logger.info(
+            f'[VERIFY] COMPLETE user={uid} guild={gid} '
+            f'role={result["role_assigned"]} firebase={result["firebase_saved"]} '
+            f'dm={result["dm_sent"]} collection={result["collection_channel_sent"]} '
+            f'log={result["log_sent"]}'
+        )
         return _api_json(result)
+
     except discord.Forbidden as exc:
-        logger.exception(f'❌ VERIFY DISCORD PERMISSION ERROR | user={uid} | guild={gid}: {exc}')
-        return _api_json({**result, 'error': 'discord_permission_denied', 'detail': str(exc)[:300]}, 403)
-    except PermissionError as exc:
-        logger.error(f'❌ VERIFY PERMISSION ERROR | {exc}')
-        return _api_json({**result, 'error': 'bot_missing_manage_roles', 'detail': str(exc)}, 403)
+        logger.exception(f'[VERIFY] DISCORD_PERMISSION_ERROR user={uid} guild={gid}: {exc}')
+        step('verified_role', 'Verified role', False, str(exc)[:300])
+        result.update(error='discord_permission_denied', detail=str(exc)[:300])
+        return _api_json(result, 403)
+    except discord.HTTPException as exc:
+        logger.exception(f'[VERIFY] DISCORD_HTTP_ERROR user={uid} guild={gid}: {exc}')
+        result.update(error=f'discord_http_{exc.status}', detail=str(exc)[:300])
+        return _api_json(result, 502)
     except Exception as exc:
-        logger.exception(f'❌ VERIFY FAILED | user={uid} | guild={gid}')
-        return _api_json({**result, 'error': 'verification_failed', 'detail': str(exc)[:500]}, 500)
+        logger.exception(f'[VERIFY] FAILED user={uid} guild={gid}')
+        result.update(error='verification_failed', detail=str(exc)[:500])
+        return _api_json(result, 500)
 
 async def api_superadmin_guilds(request):
-    if not _api_authorized(request): return _api_json({'error':'unauthorized'},401)
+    # Vercel already protects this route with the superadmin web session.
+    # The Railway endpoint only needs the private API key to enumerate every
+    # guild the bot is actually installed in. Mutating actions still require
+    # the configured SUPER_ADMIN_ID through _actor().
+    if not _api_authorized(request):
+        return _api_json({'error':'unauthorized'},401)
     aid=str(request.headers.get('X-Actor-ID',''))
-    if aid != SUPER_ADMIN_ID: return _api_json({'error':'superadmin_required'},403)
-    return _api_json({'ok':True,'guilds':[_serialize_guild(g, aid) for g in bot.guilds]})
+    return _api_json({
+        'ok': True,
+        'guilds': [_serialize_guild(g, aid if aid.isdigit() else None) for g in bot.guilds]
+    })
 
 async def start_control_api():
     global web_runner, web_site
