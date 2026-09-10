@@ -296,7 +296,7 @@ async def send_credentials_dm(member, creds, role=None, log_channel=None):
         value=f"[Open EditH Control Center]({os.getenv('WEBSITE_URL', 'https://edith-bot-api.vercel.app')})",
         inline=False
     )
-    embed.set_footer(text="Keep these credentials private.")
+    embed.set_footer(text="Keep these credentials private. (After-Login Feature currently Disable , Lord GiYu ToMiOkA Working On it...)")
 
     try:
         await member.send(embed=embed)
