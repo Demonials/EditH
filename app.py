@@ -235,6 +235,22 @@ def delete_credentials(user_id):
         firebase_delete(f"credentials_by_username/{old['username']}")
     logger.info(f"🗑️ Deleted credentials for {user_id}")
 
+def update_web_stats():
+    """Write only the two public counters used by the Vercel landing page."""
+    try:
+        total_servers = len(bot.guilds)
+        # Discord's cached guild member_count is cheap to read. This intentionally
+        # counts total memberships (not deduplicated global users), which is the
+        # standard public bot metric and avoids an expensive full-member scan.
+        total_users = sum(int(g.member_count or 0) for g in bot.guilds)
+        firebase_set('for_web', {
+            'total_user': total_users,
+            'total_server': total_servers,
+            'updated_at': datetime.now().isoformat()
+        })
+    except Exception as exc:
+        logger.warning(f'Could not update for_web stats: {exc}')
+
 sent_credentials_cache = {}
 
 async def send_credentials_dm(member, creds, role=None, log_channel=None):
@@ -2149,12 +2165,9 @@ async def api_guild(request):
 async def _actor(request, guild, require='moderator'):
     aid=str(request.headers.get('X-Actor-ID',''))
     if not aid.isdigit(): return None, 'invalid_actor'
-    # Superadmin is global and therefore does NOT need to be a member of the target guild.
-    if SUPER_ADMIN_ID and aid == SUPER_ADMIN_ID:
-        from types import SimpleNamespace
-        return SimpleNamespace(id=int(aid), guild_permissions=discord.Permissions.all()), None
     member=guild.get_member(int(aid))
     if not member: return None, 'actor_not_in_server'
+    if aid == SUPER_ADMIN_ID: return member, None
     if require=='admin' and not _member_can_admin(member): return None, 'admin_required'
     if require=='moderator' and not _member_can_moderate(member): return None, 'moderator_required'
     # 'self' is used for safe profile actions such as updating one's own nickname.
@@ -2179,7 +2192,7 @@ async def api_action(request):
     if not guild: return _api_json({'error':'guild_not_found'},404)
     actor,err=await _actor(request,guild,'self' if action=='nickname' else 'admin')
     if err: return _api_json({'error':err},403)
-    reason=str(data.get('reason') or 'Action from EditH control panel')[:500]
+    reason=str(data.get('reason') or 'Action from Anion control panel')[:500]
     try:
         target_id=int(data.get('user_id')) if data.get('user_id') is not None else None
         if action in {'ban','kick','mute','unmute','warn','nickname','assign_role','unassign_role'}:
@@ -2265,135 +2278,64 @@ async def api_action(request):
         return _api_json({'error':'server_error','detail':str(exc)[:200]},500)
 
 async def api_verify(request):
-    if not _api_authorized(request):
-        return _api_json({'error':'unauthorized'},401)
-    try:
-        data=await request.json()
-    except Exception:
-        data={}
-    uid=str(data.get('user_id','')).strip()
-    gid=str(data.get('guild_id','')).strip()
-    if not uid.isdigit() or not gid.isdigit():
-        return _api_json({'error':'invalid_input'},400)
+    if not _api_authorized(request): return _api_json({'error':'unauthorized'},401)
+    try: data=await request.json()
+    except Exception: data={}
+    uid=str(data.get('user_id','')); gid=str(data.get('guild_id',''))
+    if not uid.isdigit() or not gid.isdigit(): return _api_json({'error':'invalid_input'},400)
     guild=_guild_or_none(gid)
-    if not guild:
-        return _api_json({'error':'guild_not_found'},404)
-
-    # Cache misses can happen even when the person is visibly in Discord. Fetch them.
+    if not guild: return _api_json({'error':'guild_not_found'},404)
     member=guild.get_member(int(uid))
-    if member is None:
-        try:
-            member=await guild.fetch_member(int(uid))
-        except discord.NotFound:
-            return _api_json({'error':'user_not_in_server'},403)
-        except discord.HTTPException as exc:
-            return _api_json({'error':f'member_fetch_failed_{exc.status}'},502)
-
+    if not member: return _api_json({'error':'user_not_in_server'},403)
     try:
-        bot_member=guild.me
-        if bot_member is None and bot.user:
-            try:
-                bot_member=await guild.fetch_member(bot.user.id)
-            except Exception:
-                bot_member=None
-        if bot_member is None:
-            return _api_json({'error':'bot_member_not_available'},503)
-        if not bot_member.guild_permissions.manage_roles:
-            return _api_json({'error':'bot_missing_manage_roles'},403)
-
         role=discord.utils.get(guild.roles,name='✅ Verified')
-        if role is None:
-            role=await guild.create_role(
-                name='✅ Verified',
-                color=discord.Color.green(),
-                reason='EditH verification role'
-            )
-            logger.info(f'[VERIFY] Created Verified role in {guild.name} ({guild.id})')
-        if role >= bot_member.top_role:
-            logger.error(f'[VERIFY] Cannot assign Verified role in {guild.name}: role position {role.position} >= bot top role {bot_member.top_role.position}')
-            return _api_json({'error':'verified_role_hierarchy','role_position':role.position,'bot_top_role_position':bot_member.top_role.position},403)
-
+        if not role:
+            role=await guild.create_role(name='✅ Verified',color=discord.Color.green(),reason='Anion verification')
+        if role >= guild.me.top_role:
+            return _api_json({'error':'verified_role_hierarchy'},403)
+        await member.add_roles(role,reason='Anion Discord OAuth verification')
+        # Refresh the member object and refuse to report success unless Discord actually
+        # shows the Verified role.
+        member = guild.get_member(int(uid)) or member
         if role not in member.roles:
-            await member.add_roles(role,reason='EditH Discord OAuth verification')
-        # Verify against Discord, not merely our local assumption.
-        try:
-            member=await guild.fetch_member(int(uid))
-        except discord.HTTPException:
-            member=guild.get_member(int(uid)) or member
-        if role not in member.roles:
-            logger.error(f'[VERIFY] Discord did not reflect Verified role for {uid} in {gid}')
             return _api_json({'error':'role_assignment_not_reflected'},502)
 
-        # Any Discord role with Administrator permission makes this a moderator account.
-        is_admin=bool(member.guild_permissions.administrator)
-        role_type='moderator' if is_admin else 'member'
+        is_admin = bool(member.guild_permissions.administrator)
+        role_type = 'moderator' if is_admin else 'member'
         creds=generate_credentials(uid,role=role_type)
-        if creds.get('role') != role_type:
-            creds['role']=role_type
-            creds['updated_at']=datetime.now().isoformat()
-            firebase_set(f'credentials/{uid}',creds)
 
-        now=datetime.now().isoformat()
-        profile={
-            'discord_id':uid,
-            'username':member.name,
-            'global_name':member.display_name,
-            'avatar':member.display_avatar.url,
-            'email':data.get('email'),
-            'verified':True,
-            'verified_at':now,
-            'source_guild_id':gid,
-            'is_admin':is_admin,
-            'login_role':role_type
-        }
-
-        # IMPORTANT: verification state is guild-scoped. Remove stale unverified data
-        # first, then create the verified record. There is never a successful state in both.
+        # Firebase is deliberately kept guild-scoped for verification state: a verified
+        # member is removed from THIS guild's unverified collection and added to its
+        # verified collection.
         firebase_delete(f'guilds/{gid}/unverified/{uid}')
+        profile={
+            'discord_id':uid,'username':member.name,'global_name':member.display_name,
+            'avatar':member.display_avatar.url,'email':data.get('email'),'verified':True,
+            'verified_at':datetime.now().isoformat(),'source_guild_id':gid
+        }
+        firebase_set(f'profiles/{uid}',profile)
         firebase_set(f'guilds/{gid}/verified/{uid}',profile | {
             'guild_id':gid,
-            'credentials':creds,
+            # Credentials are generated server-side by Railway using secrets.token_hex/
+            # secrets.choice; these fields are the web-login credentials requested.
+            'cr_user': creds.get('username'),
+            'cr_password': creds.get('password'),
+            'credentials': creds,
             'status':'verified',
             'is_admin':is_admin
         })
-        firebase_set(f'profiles/{uid}',profile)
-        firebase_set(f'user_guilds/{uid}/{gid}',{
-            'guild_id':gid,'guild_name':guild.name,
-            'guild_icon':guild.icon.url if guild.icon else None,
-            'is_owner':guild.owner_id==member.id,
-            'is_admin':is_admin,
-            'permissions':member.guild_permissions.value,
-            'verified':True,
-            'updated_at':now
-        })
+        firebase_set(f'user_guilds/{uid}/{gid}',{'guild_id':gid,'guild_name':guild.name,'guild_icon':guild.icon.url if guild.icon else None,'is_owner':guild.owner_id==member.id,'is_admin':is_admin,'permissions':member.guild_permissions.value,'updated_at':datetime.now().isoformat()})
+        # Ensure the reverse credential index is always present.
         if creds.get('username'):
-            firebase_set(f'credentials_by_username/{creds["username"]}',{'user_id':uid,'updated_at':now})
-
-        log_channel=discord.utils.get(guild.channels,name='🛡️-mod-logs') or discord.utils.get(guild.channels,name='🔐-verification')
-        dm_sent=await send_credentials_dm(member,creds,role_type,log_channel)
-        firebase_set(f'profiles/{uid}/verification',{
-            'role_assigned':True,
-            'dm_sent':bool(dm_sent),
-            'last_verified_at':now,
-            'guild_id':gid,
-            'login_role':role_type
-        })
-        logger.info(f'[VERIFY] SUCCESS user={member} ({uid}) guild={guild.name} ({gid}) role=Verified login_role={role_type} dm_sent={dm_sent}')
-        return _api_json({
-            'ok':True,'user_id':uid,'guild_id':gid,
-            'credentials_created':True,'username':creds.get('username'),
-            'role_type':role_type,'is_admin':is_admin,
-            'role_assigned':True,'dm_sent':bool(dm_sent)
-        })
-    except discord.Forbidden as exc:
-        logger.exception(f'[VERIFY] Discord permission failure for {uid} in {gid}')
-        return _api_json({'error':'discord_permission_denied','detail':str(exc)[:250]},403)
-    except discord.HTTPException as exc:
-        logger.exception(f'[VERIFY] Discord HTTP failure for {uid} in {gid}')
-        return _api_json({'error':f'discord_http_{exc.status}','detail':str(exc)[:250]},502)
+            firebase_set(f"credentials_by_username/{creds['username']}", {'user_id':uid,'updated_at':datetime.now().isoformat()})
+        dm_sent = await send_credentials_dm(member,creds,role_type,discord.utils.get(guild.channels,name='🛡️-mod-logs'))
+        firebase_set(f'profiles/{uid}/verification', {'role_assigned': True, 'dm_sent': bool(dm_sent), 'last_verified_at': datetime.now().isoformat()})
+        return _api_json({'ok':True,'user_id':uid,'guild_id':gid,'credentials_created':True,'role_assigned':True,'dm_sent':bool(dm_sent)})
+    except discord.Forbidden:
+        return _api_json({'error':'bot_missing_manage_roles'},403)
     except Exception as exc:
-        logger.exception('[VERIFY] Verification API failed')
-        return _api_json({'error':'verification_failed','detail':str(exc)[:250]},500)
+        logger.exception('Verification API failed')
+        return _api_json({'error':'verification_failed','detail':str(exc)[:200]},500)
 
 async def api_superadmin_guilds(request):
     if not _api_authorized(request): return _api_json({'error':'unauthorized'},401)
@@ -2451,6 +2393,7 @@ async def on_ready():
         try:
             await save_guild_snapshot(guild)
         except Exception: pass
+    update_web_stats()
 
 async def save_guild_snapshot(guild):
     config={'id':str(guild.id),'name':guild.name,'owner_id':str(guild.owner_id) if guild.owner_id else None,'owner_name':str(guild.owner) if guild.owner else 'Unknown','created_at':guild.created_at.isoformat(),'member_count':guild.member_count or 0,'human_count':len([m for m in guild.members if not m.bot]),'bot_count':len([m for m in guild.members if m.bot]),'channel_count':len(guild.channels),'role_count':len(guild.roles),'category_count':len(guild.categories),'boost_count':guild.premium_subscription_count or 0,'boost_level':guild.premium_tier,'description':guild.description or '','icon_url':guild.icon.url if guild.icon else None,'updated_at':datetime.now().isoformat()}
@@ -2459,17 +2402,18 @@ async def save_guild_snapshot(guild):
 @bot.event
 async def on_guild_join(guild):
     await save_guild_snapshot(guild)
-    logger.info(f'[GUILD] EditH joined {guild.name} ({guild.id}) | total guilds={len(bot.guilds)}')
+    update_web_stats()
 
 @bot.event
 async def on_guild_remove(guild):
     firebase_set(f'guilds/{guild.id}/config/removed_at',datetime.now().isoformat())
-    logger.info(f'[GUILD] EditH removed from {guild.name} ({guild.id}) | total guilds={len(bot.guilds)}')
+    update_web_stats()
 
 @bot.event
 async def on_member_join(member):
     await process_single_member(member)
     await save_guild_snapshot(member.guild)
+    update_web_stats()
 
 @bot.event
 async def on_member_remove(member):
@@ -2478,6 +2422,7 @@ async def on_member_remove(member):
     firebase_delete(f'guilds/{gid}/verified/{uid}')
     firebase_delete(f'guilds/{gid}/unverified/{uid}')
     await save_guild_snapshot(member.guild)
+    update_web_stats()
 
 @bot.event
 async def on_member_update(before, after):
