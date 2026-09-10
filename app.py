@@ -923,8 +923,11 @@ class SetupView(View):
     
     @discord.ui.button(label="⚡ SETUP ALL", style=discord.ButtonStyle.success, emoji="⚡", row=0)
     async def setup_all_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+        if interaction.guild.owner_id != interaction.user.id:
+            await interaction.response.send_message(
+                "❌ Only the server owner can use this!",
+                ephemeral=True
+            )
             return
         await interaction.response.send_message("🔄 **Starting full server setup...**\n\n⏳ This will take a moment...", ephemeral=True)
         await self.setup_all(interaction.guild, interaction)
