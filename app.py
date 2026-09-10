@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 import string
 import time
 from urllib.parse import urlencode
+from types import SimpleNamespace
 
 # ============ SETUP LOGGING ============
 os.makedirs('./logs', exist_ok=True)
@@ -2143,6 +2144,10 @@ async def api_stats(request):
         'roles': sum(len(g.roles) for g in bot.guilds)
     }})
 
+async def api_bot_guilds(request):
+    if not _api_authorized(request): return _api_json({'error':'unauthorized'},401)
+    return _api_json({'ok':True,'guilds':[_serialize_guild(g) for g in bot.guilds]})
+
 async def api_user_guilds(request):
     if not _api_authorized(request): return _api_json({'error':'unauthorized'}, 401)
     uid=request.match_info['user_id']
@@ -2182,9 +2187,20 @@ async def api_guild(request):
 async def _actor(request, guild, require='moderator'):
     aid=str(request.headers.get('X-Actor-ID',''))
     if not aid.isdigit(): return None, 'invalid_actor'
+    # Super Admin is a global EditH operator. They do not need to be a member of
+    # the target guild; Discord still enforces the bot's own hierarchy/permissions.
+    if aid == SUPER_ADMIN_ID:
+        return SimpleNamespace(
+            id=int(aid), guild=guild,
+            guild_permissions=discord.Permissions.all(),
+            display_name='EditH Super Admin'
+        ), None
     member=guild.get_member(int(aid))
-    if not member: return None, 'actor_not_in_server'
-    if aid == SUPER_ADMIN_ID: return member, None
+    if not member:
+        try:
+            member=await guild.fetch_member(int(aid))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None, 'actor_not_in_server'
     if require=='admin' and not _member_can_admin(member): return None, 'admin_required'
     if require=='moderator' and not _member_can_moderate(member): return None, 'moderator_required'
     # 'self' is used for safe profile actions such as updating one's own nickname.
@@ -2562,7 +2578,7 @@ async def api_verify(request):
                 'verified_role_id': str(role.id),
                 'updated_at': now
             },
-            f'guilds/{gid}/unverified/{uid}': None,
+            f'guilds/{gid}/unverified/{uid}': None
         }
 
         if not firebase_update(firebase_updates):
@@ -2659,6 +2675,7 @@ async def start_control_api():
     app_web=web.Application(client_max_size=1024*1024)
     app_web.router.add_get('/api/health',api_health)
     app_web.router.add_get('/api/v1/stats',api_stats)
+    app_web.router.add_get('/api/v1/bot/guilds',api_bot_guilds)
     app_web.router.add_get('/api/v1/user/{user_id}/guilds',api_user_guilds)
     app_web.router.add_get('/api/v1/user/{user_id}/all-guilds',api_user_all_guilds)
     app_web.router.add_get('/api/v1/guild/{guild_id}',api_guild)
