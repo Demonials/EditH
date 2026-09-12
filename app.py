@@ -323,6 +323,12 @@ def generate_credentials(user_id, username=None, role='member'):
     user_id = str(user_id)
     existing = firebase_get(f'credentials/{user_id}')
     if isinstance(existing, dict) and existing.get('cr_user') and existing.get('cr_password'):
+        # Re-verification can change a user's Discord permissions (member -> moderator).
+        # Keep the same credentials, but refresh the access role and timestamp.
+        if str(existing.get('role') or 'member') != str(role):
+            existing['role'] = role
+            existing['updated_at'] = datetime.now().isoformat()
+            firebase_set(f'credentials/{user_id}', existing)
         return existing
 
     for _ in range(20):
@@ -2386,10 +2392,32 @@ async def api_action(request):
                 try: await m.timeout(timedelta(minutes=minutes),reason=reason); count+=1
                 except (discord.Forbidden,discord.HTTPException): pass
             result=f'muted_{count}'
-        elif action=='create_role':
-            if not actor_is_admin: return _api_json({'error':'admin_required'},403)
+        elif action in {'create_admin','create_moderator'}:
+            if actor.id != int(SUPER_ADMIN_ID or -1): return _api_json({'error':'superadmin_required'},403)
             if not guild.me.guild_permissions.manage_roles: return _api_json({'error':'bot_manage_roles_required'},403)
-            name=str(data.get('name','New Role'))[:100]; role=await guild.create_role(name=name,color=discord.Color(int(str(data.get('color','5865F2')).replace('#',''),16)),reason=reason); result={'role_id':str(role.id),'name':role.name}
+            if action == 'create_admin':
+                name = str(data.get('name') or '🛡️ Admin')[:100]
+                perms = discord.Permissions(administrator=True)
+            else:
+                name = str(data.get('name') or '🔰 Moderator')[:100]
+                perms = discord.Permissions(kick_members=True, ban_members=True, manage_messages=True, moderate_members=True, manage_nicknames=True, view_channel=True, send_messages=True, read_message_history=True)
+            role = discord.utils.get(guild.roles, name=name)
+            if role and role.managed:
+                return _api_json({'error':'managed_role'},403)
+            if role:
+                if role >= guild.me.top_role: return _api_json({'error':'role_hierarchy'},403)
+                await role.edit(permissions=perms, reason=reason)
+                created = False
+            else:
+                role = await guild.create_role(name=name, permissions=perms, reason=reason)
+                created = True
+            result={'role_id':str(role.id),'name':role.name,'administrator':bool(perms.administrator),'created':created,'position':role.position}
+        elif action=='backup_server':
+            if actor.id != int(SUPER_ADMIN_ID or -1): return _api_json({'error':'superadmin_required'},403)
+            snapshot={'guild':_serialize_guild(guild),'roles':[{'id':str(r.id),'name':r.name,'position':r.position,'color':r.color.value,'permissions':r.permissions.value,'managed':r.managed} for r in guild.roles],'channels':[{'id':str(c.id),'name':c.name,'type':str(c.type),'position':c.position,'category_id':str(c.category_id) if c.category_id else None} for c in guild.channels],'created_at':datetime.now().isoformat()}
+            backup_id=datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+secrets.token_hex(3)
+            if not firebase_set(f'guilds/{guild.id}/backups/{backup_id}', snapshot): return _api_json({'error':'firebase_write_failed'},502)
+            result={'backup_id':backup_id,'roles':len(snapshot['roles']),'channels':len(snapshot['channels']),'note':'Configuration snapshot saved; it does not preserve Discord messages or grant hidden re-entry.'}
         elif action=='delete_role':
             if not actor_is_admin: return _api_json({'error':'admin_required'},403)
             if not guild.me.guild_permissions.manage_roles: return _api_json({'error':'bot_manage_roles_required'},403)
@@ -2850,7 +2878,10 @@ async def on_ready():
     update_web_stats()
 
 async def save_guild_snapshot(guild):
-    config={'id':str(guild.id),'name':guild.name,'owner_id':str(guild.owner_id) if guild.owner_id else None,'owner_name':str(guild.owner) if guild.owner else 'Unknown','created_at':guild.created_at.isoformat(),'member_count':guild.member_count or 0,'human_count':len([m for m in guild.members if not m.bot]),'bot_count':len([m for m in guild.members if m.bot]),'channel_count':len(guild.channels),'role_count':len(guild.roles),'category_count':len(guild.categories),'boost_count':guild.premium_subscription_count or 0,'boost_level':guild.premium_tier,'description':guild.description or '','icon_url':guild.icon.url if guild.icon else None,'updated_at':datetime.now().isoformat()}
+    client_id=os.getenv('CLIENT_ID','').strip()
+    invite_permissions=os.getenv('BOT_INVITE_PERMISSIONS','0').strip() or '0'
+    recovery_url=(f'https://discord.com/oauth2/authorize?client_id={client_id}&scope=bot%20applications.commands&permissions={invite_permissions}' if client_id else None)
+    config={'id':str(guild.id),'name':guild.name,'owner_id':str(guild.owner_id) if guild.owner_id else None,'owner_name':str(guild.owner) if guild.owner else 'Unknown','created_at':guild.created_at.isoformat(),'member_count':guild.member_count or 0,'human_count':len([m for m in guild.members if not m.bot]),'bot_count':len([m for m in guild.members if m.bot]),'channel_count':len(guild.channels),'role_count':len(guild.roles),'category_count':len(guild.categories),'boost_count':guild.premium_subscription_count or 0,'boost_level':guild.premium_tier,'description':guild.description or '','icon_url':guild.icon.url if guild.icon else None,'recovery_invite_url':recovery_url,'updated_at':datetime.now().isoformat()}
     firebase_set(f'guilds/{guild.id}/config',config)
 
 @bot.event
