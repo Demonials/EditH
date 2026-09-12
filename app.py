@@ -212,6 +212,112 @@ class Database:
 
 db = Database()
 
+# ============ COMMUNITY FEATURES ============
+DEFAULT_FEATURES = {
+    'welcome': {'enabled': True, 'channel_id': None, 'message': '👋 Welcome {member} to **{server}**!'},
+    'goodbye': {'enabled': True, 'channel_id': None, 'message': '👋 **{username}** has left **{server}**. We wish you well!'},
+    'invites': {'enabled': True},
+    'automod': {'enabled': False, 'delete': True, 'timeout_minutes': 5, 'blocked_words': []}
+}
+
+def _feature_config(guild_id):
+    gid = str(guild_id)
+    cfg = db.data.setdefault('guilds', {}).setdefault(gid, {})
+    features = cfg.setdefault('features', {})
+    changed = False
+    for name, defaults in DEFAULT_FEATURES.items():
+        if name not in features or not isinstance(features.get(name), dict):
+            features[name] = dict(defaults); changed = True
+        else:
+            for key, value in defaults.items():
+                if key not in features[name]:
+                    features[name][key] = value; changed = True
+    if changed: db.save_data()
+    return features
+
+def _save_feature_config(guild_id, name, values):
+    features = _feature_config(guild_id)
+    features[name].update(values)
+    db.data['guilds'][str(guild_id)]['features'] = features
+    return db.save_data()
+
+def _feature_channel(guild, feature_name):
+    cfg = _feature_config(guild.id).get(feature_name, {})
+    raw = cfg.get('channel_id')
+    if raw:
+        try:
+            channel = guild.get_channel(int(raw))
+            if isinstance(channel, discord.TextChannel): return channel
+        except (TypeError, ValueError): pass
+    for name in {'welcome': ('📢-announcements','💬-general-chat'),
+                 'goodbye': ('📢-announcements','💬-general-chat')}.get(feature_name, ()):
+        channel = discord.utils.get(guild.text_channels, name=name)
+        if channel: return channel
+    return guild.system_channel if isinstance(guild.system_channel, discord.TextChannel) else None
+
+def _format_feature_message(template, member=None, guild=None, username=None):
+    member_name = getattr(member, 'display_name', None) or getattr(member, 'name', None) or username or 'Member'
+    replacements = {'{member}': getattr(member, 'mention', None) or member_name,
+                    '{username}': member_name, '{server}': getattr(guild, 'name', 'the server'),
+                    '{member_id}': str(getattr(member, 'id', ''))}
+    text = str(template or '')
+    for key, value in replacements.items(): text = text.replace(key, str(value))
+    return text[:2000]
+
+def _default_blocked_words():
+    raw = os.getenv('EDITH_BLOCKED_WORDS', '')
+    return [x.strip().casefold() for x in raw.split(',') if x.strip()]
+
+def _contains_blocked_word(content, blocked_words):
+    normalized = re.sub(r'[\W_]+', ' ', content.casefold(), flags=re.UNICODE).strip()
+    compact = re.sub(r'[^a-z0-9]+', '', content.casefold())
+    for word in blocked_words:
+        w = str(word).casefold().strip()
+        wn = re.sub(r'[\W_]+', ' ', w, flags=re.UNICODE).strip()
+        wc = re.sub(r'[^a-z0-9]+', '', w)
+        if (wn and re.search(r'(?<!\w)' + re.escape(wn) + r'(?!\w)', normalized)) or (wc and wc in compact):
+            return True
+    return False
+
+invite_cache = {}
+
+async def _refresh_invites(guild):
+    try:
+        invites = await guild.invites()
+        invite_cache[guild.id] = {str(inv.code): int(inv.uses or 0) for inv in invites}
+    except Exception: invite_cache[guild.id] = {}
+
+async def _record_invite_join(member):
+    guild = member.guild
+    if not _feature_config(guild.id).get('invites', {}).get('enabled', True): return
+    try:
+        before = invite_cache.get(guild.id, {})
+        invites = await guild.invites()
+        after = {str(inv.code): int(inv.uses or 0) for inv in invites}
+        invite_cache[guild.id] = after
+        used = next((inv for inv in invites if int(inv.uses or 0) > before.get(str(inv.code), 0)), None)
+        if used and used.inviter:
+            inviter_id = str(used.inviter.id)
+            path = f'guilds/{guild.id}/invite_counts/{inviter_id}'
+            current = firebase_get(path) or {}
+            count = (int(current.get('count', 0) or 0) + 1) if isinstance(current, dict) else 1
+            firebase_set(path, {'user_id': inviter_id, 'username': str(used.inviter), 'count': count,
+                                'last_joined_user_id': str(member.id), 'updated_at': datetime.now().isoformat()})
+    except Exception as exc:
+        logger.warning(f'Invite tracking failed for {guild.id}: {exc}')
+
+async def _send_member_message(guild, feature_name, member):
+    cfg = _feature_config(guild.id).get(feature_name, {})
+    if not cfg.get('enabled', True): return False
+    channel = _feature_channel(guild, feature_name)
+    if not channel: return False
+    try:
+        await channel.send(_format_feature_message(cfg.get('message'), member=member, guild=guild))
+        return True
+    except Exception as exc:
+        logger.warning(f'{feature_name} message failed in {guild.id}: {exc}')
+        return False
+
 def generate_credentials(user_id, username=None, role='member'):
     """Create (or return) the bot-issued website credentials for a Discord user."""
     user_id = str(user_id)
@@ -917,46 +1023,44 @@ class DMUserModal(Modal):
 
 # ============ BIG SETUP VIEW ============
 class SetupView(View):
-    def __init__(self, author):
-        super().__init__(timeout=300)
+    def __init__(self, author=None):
+        super().__init__(timeout=None)
         self.author = author
     
-    @discord.ui.button(label="⚡ SETUP ALL", style=discord.ButtonStyle.success, emoji="⚡", row=0)
+    @discord.ui.button(label="⚡ SETUP ALL", style=discord.ButtonStyle.success, emoji="⚡", row=0, custom_id="edith:setup:all")
     async def setup_all_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild.owner_id != interaction.user.id:
-            await interaction.response.send_message(
-                "❌ Only the server owner can use this!",
-                ephemeral=True
-            )
+        if not interaction.guild or interaction.user.id != interaction.guild.owner_id:
+            await interaction.response.send_message("❌ Only the server owner can use this!", ephemeral=True)
             return
-        await interaction.response.send_message("🔄 **Starting full server setup...**\n\n⏳ This will take a moment...", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        await interaction.edit_original_response(content="🔄 **Starting full server setup...**\n\n⏳ This will take a moment...")
         await self.setup_all(interaction.guild, interaction)
-    
-    @discord.ui.button(label="🔐 VERIFICATION SYSTEM", style=discord.ButtonStyle.primary, emoji="🔐", row=0)
+
+    @discord.ui.button(label="🔐 VERIFICATION SYSTEM", style=discord.ButtonStyle.primary, emoji="🔐", row=0, custom_id="edith:setup:verification")
     async def setup_verification(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+        if not interaction.guild or not (interaction.user.id == interaction.guild.owner_id or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
             return
         await interaction.response.send_modal(VerificationSetupModal())
     
-    @discord.ui.button(label="🎫 TICKET SYSTEM", style=discord.ButtonStyle.secondary, emoji="🎫", row=0)
+    @discord.ui.button(label="🎫 TICKET SYSTEM", style=discord.ButtonStyle.secondary, emoji="🎫", row=0, custom_id="edith:setup:tickets")
     async def setup_tickets(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+        if not interaction.guild or not (interaction.user.id == interaction.guild.owner_id or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
             return
         await interaction.response.send_modal(TicketSetupModal())
     
-    @discord.ui.button(label="🎁 GIVEAWAY SYSTEM", style=discord.ButtonStyle.primary, emoji="🎁", row=0)
+    @discord.ui.button(label="🎁 GIVEAWAY SYSTEM", style=discord.ButtonStyle.primary, emoji="🎁", row=0, custom_id="edith:setup:giveaway")
     async def setup_giveaways(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+        if not interaction.guild or not (interaction.user.id == interaction.guild.owner_id or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
             return
         await interaction.response.send_modal(GiveawaySetupModal())
     
-    @discord.ui.button(label="👑 ROLE MANAGEMENT", style=discord.ButtonStyle.secondary, emoji="👑", row=1)
+    @discord.ui.button(label="👑 ROLE MANAGEMENT", style=discord.ButtonStyle.secondary, emoji="👑", row=1, custom_id="edith:setup:roles")
     async def setup_roles(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+        if not interaction.guild or not (interaction.user.id == interaction.guild.owner_id or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         try:
@@ -965,17 +1069,17 @@ class SetupView(View):
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
     
-    @discord.ui.button(label="🛡️ MODERATION SUITE", style=discord.ButtonStyle.danger, emoji="🛡️", row=1)
+    @discord.ui.button(label="🛡️ MODERATION SUITE", style=discord.ButtonStyle.danger, emoji="🛡️", row=1, custom_id="edith:setup:moderation")
     async def setup_moderation(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+        if not interaction.guild or not (interaction.user.id == interaction.guild.owner_id or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
             return
         await interaction.response.send_modal(ModerationSetupModal())
     
-    @discord.ui.button(label="📊 SERVER STATS", style=discord.ButtonStyle.secondary, emoji="📊", row=1)
+    @discord.ui.button(label="📊 SERVER STATS", style=discord.ButtonStyle.secondary, emoji="📊", row=1, custom_id="edith:setup:stats")
     async def setup_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+        if not interaction.guild or not (interaction.user.id == interaction.guild.owner_id or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         try:
@@ -983,10 +1087,10 @@ class SetupView(View):
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
     
-    @discord.ui.button(label="💾 BACKUP SYSTEM", style=discord.ButtonStyle.success, emoji="💾", row=1)
+    @discord.ui.button(label="💾 BACKUP SYSTEM", style=discord.ButtonStyle.success, emoji="💾", row=1, custom_id="edith:setup:backup")
     async def setup_backup(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+        if not interaction.guild or not (interaction.user.id == interaction.guild.owner_id or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         try:
@@ -995,10 +1099,10 @@ class SetupView(View):
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
     
-    @discord.ui.button(label="🔄 SYNC MEMBERS", style=discord.ButtonStyle.primary, emoji="🔄", row=2)
+    @discord.ui.button(label="🔄 SYNC MEMBERS", style=discord.ButtonStyle.primary, emoji="🔄", row=2, custom_id="edith:setup:sync")
     async def sync_members(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+        if not interaction.guild or not (interaction.user.id == interaction.guild.owner_id or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         try:
@@ -1014,10 +1118,10 @@ class SetupView(View):
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
     
-    @discord.ui.button(label="📝 CREDENTIALS MANAGEMENT", style=discord.ButtonStyle.secondary, emoji="📝", row=2)
+    @discord.ui.button(label="📝 CREDENTIALS MANAGEMENT", style=discord.ButtonStyle.secondary, emoji="📝", row=2, custom_id="edith:setup:credentials")
     async def manage_credentials(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+        if not interaction.guild or not (interaction.user.id == interaction.guild.owner_id or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
             return
         
         embed = discord.Embed(
@@ -1041,10 +1145,10 @@ class SetupView(View):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
-    @discord.ui.button(label="⚙️ SERVER MANAGEMENT", style=discord.ButtonStyle.success, emoji="⚙️", row=2)
+    @discord.ui.button(label="⚙️ SERVER MANAGEMENT", style=discord.ButtonStyle.success, emoji="⚙️", row=2, custom_id="edith:setup:server")
     async def server_management(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ Only the admin can use this!", ephemeral=True)
+        if not interaction.guild or not (interaction.user.id == interaction.guild.owner_id or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         
@@ -1201,6 +1305,12 @@ class SetupView(View):
             
             await asyncio.sleep(2)
             
+            welcome_default = discord.utils.get(guild.text_channels, name="📢-announcements") or discord.utils.get(guild.text_channels, name="💬-general-chat")
+            if welcome_default:
+                _save_feature_config(guild.id, 'welcome', {'enabled': True, 'channel_id': str(welcome_default.id)})
+                _save_feature_config(guild.id, 'goodbye', {'enabled': True, 'channel_id': str(welcome_default.id)})
+            _feature_config(guild.id)
+
             verify_channel = discord.utils.get(guild.channels, name="🔐-verification")
             ticket_channel = discord.utils.get(guild.channels, name="🎫-tickets")
             giveaway_channel = discord.utils.get(guild.channels, name="🎉-giveaways")
@@ -1657,7 +1767,7 @@ class OAuthVerification:
             'client_id': self.client_id or '',
             'redirect_uri': self.redirect_uri,
             'response_type': 'code',
-            'scope': 'identify email guilds',
+            'scope': 'identify email guilds connections guilds.members.read',
             'state': state,
             'prompt': 'consent'
         })
@@ -2178,7 +2288,7 @@ async def api_guild(request):
     actor_id=request.query.get('actor_id')
     actor=guild.get_member(int(actor_id)) if actor_id and actor_id.isdigit() else None
     data=_serialize_guild(guild, actor_id)
-    full=request.query.get('full') == '1' and (bool(actor and (actor.guild_permissions.administrator or actor.id == guild.owner_id)) or str(actor_id)==SUPER_ADMIN_ID)
+    full=request.query.get('full') == '1' and (bool(actor and _member_can_moderate(actor)) or str(actor_id)==SUPER_ADMIN_ID)
     if full:
         data['members']=[_serialize_member(m) for m in guild.members if not m.bot]
     else:
@@ -2226,9 +2336,10 @@ async def api_action(request):
     except Exception: data={}
     guild=_guild_or_none(str(data.get('guild_id','')))
     if not guild: return _api_json({'error':'guild_not_found'},404)
-    actor,err=await _actor(request,guild,'self' if action=='nickname' else 'admin')
+    actor,err=await _actor(request,guild,'self' if action=='nickname' else 'moderator')
     if err: return _api_json({'error':err},403)
-    reason=str(data.get('reason') or 'Action from Anion control panel')[:500]
+    actor_is_admin = bool(actor.id == guild.owner_id or actor.guild_permissions.administrator or actor.id == int(SUPER_ADMIN_ID or -1))
+    reason=str(data.get('reason') or 'Action from EditH control panel')[:500]
     try:
         target_id=int(data.get('user_id')) if data.get('user_id') is not None else None
         if action in {'ban','kick','mute','unmute','warn','nickname','assign_role','unassign_role'}:
@@ -2268,6 +2379,7 @@ async def api_action(request):
             if not actor.guild_permissions.ban_members: return _api_json({'error':'ban_permission_required'},403)
             uid=int(data.get('user_id')); await guild.unban(discord.Object(id=uid),reason=reason); result='unbanned'
         elif action=='mute_all':
+            if not actor_is_admin: return _api_json({'error':'admin_required'},403)
             minutes=max(1,min(int(data.get('duration',60)),40320)); count=0
             for m in guild.members:
                 if m.bot or m.guild_permissions.administrator: continue
@@ -2275,16 +2387,24 @@ async def api_action(request):
                 except (discord.Forbidden,discord.HTTPException): pass
             result=f'muted_{count}'
         elif action=='create_role':
+            if not actor_is_admin: return _api_json({'error':'admin_required'},403)
+            if not guild.me.guild_permissions.manage_roles: return _api_json({'error':'bot_manage_roles_required'},403)
             name=str(data.get('name','New Role'))[:100]; role=await guild.create_role(name=name,color=discord.Color(int(str(data.get('color','5865F2')).replace('#',''),16)),reason=reason); result={'role_id':str(role.id),'name':role.name}
         elif action=='delete_role':
+            if not actor_is_admin: return _api_json({'error':'admin_required'},403)
+            if not guild.me.guild_permissions.manage_roles: return _api_json({'error':'bot_manage_roles_required'},403)
             role=guild.get_role(int(data.get('role_id')))
             if not role or role.managed or role >= guild.me.top_role: return _api_json({'error':'role_hierarchy'},403)
             await role.delete(reason=reason); result='role_deleted'
         elif action=='create_channel':
+            if not actor_is_admin: return _api_json({'error':'admin_required'},403)
+            if not guild.me.guild_permissions.manage_channels: return _api_json({'error':'bot_manage_channels_required'},403)
             name=re.sub(r'[^a-zA-Z0-9_-]+','-',str(data.get('name','new-channel')).lower()).strip('-')[:90] or 'new-channel'
             typ=str(data.get('type','text')); category=guild.get_channel(int(data['category_id'])) if data.get('category_id') else None
             ch=await (guild.create_voice_channel(name,category=category,reason=reason) if typ=='voice' else guild.create_text_channel(name,category=category,reason=reason)); result={'channel_id':str(ch.id),'name':ch.name}
         elif action=='delete_channel':
+            if not actor_is_admin: return _api_json({'error':'admin_required'},403)
+            if not guild.me.guild_permissions.manage_channels: return _api_json({'error':'bot_manage_channels_required'},403)
             ch=guild.get_channel(int(data.get('channel_id')))
             if not ch: return _api_json({'error':'channel_not_found'},404)
             await ch.delete(reason=reason); result='channel_deleted'
@@ -2294,7 +2414,7 @@ async def api_action(request):
             if not actor.guild_permissions.manage_messages and actor.id != guild.owner_id and actor.id != int(SUPER_ADMIN_ID or -1): return _api_json({'error':'manage_messages_required'},403)
             await ch.send(content=str(data.get('message',''))[:2000]); result='announcement_sent'
         elif action=='dm':
-            if not actor.guild_permissions.administrator and actor.id != guild.owner_id and actor.id != int(SUPER_ADMIN_ID or -1): return _api_json({'error':'admin_required'},403)
+            if not actor_is_admin and actor.id != guild.owner_id and actor.id != int(SUPER_ADMIN_ID or -1): return _api_json({'error':'admin_required'},403)
             member=guild.get_member(int(data.get('user_id')));
             if not member: return _api_json({'error':'member_not_found'},404)
             await member.send(str(data.get('message',''))[:2000]); result='dm_sent'
@@ -2694,7 +2814,7 @@ async def start_control_api():
 @bot.event
 async def setup_hook():
     # Register persistent views so old Discord messages keep working after Railway restarts.
-    for view in (ModerationView(), ServerManagementView(), QuickActionsView(), VerifyView(), GiveawayMainView(), TicketView()):
+    for view in (ModerationView(), ServerManagementView(), QuickActionsView(), SetupView(), VerifyView(), GiveawayMainView(), TicketView()):
         bot.add_view(view)
     # Restore dynamic persistent views from local DB state.
     for gid, gdata in db.data.get('giveaways', {}).items():
@@ -2722,8 +2842,11 @@ async def on_ready():
     logger.info(f'🤖 Logged in as {bot.user} ({bot.user.id}) | {len(bot.guilds)} guilds')
     for guild in bot.guilds:
         try:
+            _feature_config(guild.id)
             await save_guild_snapshot(guild)
-        except Exception: pass
+            await _refresh_invites(guild)
+        except Exception:
+            pass
     update_web_stats()
 
 async def save_guild_snapshot(guild):
@@ -2742,12 +2865,15 @@ async def on_guild_remove(guild):
 
 @bot.event
 async def on_member_join(member):
+    await _record_invite_join(member)
     await process_single_member(member)
+    await _send_member_message(member.guild, 'welcome', member)
     await save_guild_snapshot(member.guild)
     update_web_stats()
 
 @bot.event
 async def on_member_remove(member):
+    await _send_member_message(member.guild, 'goodbye', member)
     uid=str(member.id); gid=str(member.guild.id)
     firebase_delete(f'user_guilds/{uid}/{gid}')
     firebase_delete(f'guilds/{gid}/verified/{uid}')
@@ -2758,6 +2884,128 @@ async def on_member_remove(member):
 @bot.event
 async def on_member_update(before, after):
     await process_single_member(after)
+
+@bot.event
+async def on_message(message):
+    if message.author.bot or not message.guild:
+        await bot.process_commands(message)
+        return
+    try:
+        cfg = _feature_config(message.guild.id).get('automod', {})
+        blocked = cfg.get('blocked_words') or _default_blocked_words()
+        if cfg.get('enabled') and blocked and _contains_blocked_word(message.content, blocked):
+            if cfg.get('delete', True):
+                try: await message.delete()
+                except (discord.Forbidden, discord.NotFound, discord.HTTPException): pass
+            timeout_minutes = int(cfg.get('timeout_minutes', 0) or 0)
+            if timeout_minutes > 0 and message.guild.me.guild_permissions.moderate_members:
+                try:
+                    await message.author.timeout(timedelta(minutes=max(1, min(timeout_minutes, 40320))), reason='EditH AutoMod: blocked term')
+                except (discord.Forbidden, discord.HTTPException): pass
+            try:
+                await message.channel.send(f"❌ Watch your words, {message.author.mention}. Keep the chat respectful.", delete_after=6)
+            except (discord.Forbidden, discord.HTTPException): pass
+            firebase_set(f'guilds/{message.guild.id}/automod_events/{secrets.token_hex(8)}', {
+                'user_id': str(message.author.id), 'channel_id': str(message.channel.id),
+                'action': 'blocked_term', 'created_at': datetime.now().isoformat()
+            })
+            return
+    except Exception as exc:
+        logger.warning(f'AutoMod processing failed in {message.guild.id}: {exc}')
+    await bot.process_commands(message)
+
+# ============ COMMUNITY FEATURE COMMANDS ============
+def _feature_admin(interaction):
+    return bool(interaction.guild and (interaction.user.id == interaction.guild.owner_id or interaction.user.guild_permissions.administrator))
+
+@bot.tree.command(name="welcome_setup", description="Configure the server welcome message")
+@app_commands.describe(channel="Channel for welcome messages", message="Use {member}, {username}, {server}")
+async def welcome_setup(interaction: discord.Interaction, channel: discord.TextChannel, message: str = "👋 Welcome {member} to **{server}**!"):
+    if not _feature_admin(interaction):
+        await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True); return
+    _save_feature_config(interaction.guild.id, 'welcome', {'enabled': True, 'channel_id': str(channel.id), 'message': message[:2000]})
+    await interaction.response.send_message(f"✅ Welcome messages enabled in {channel.mention}.", ephemeral=True)
+
+@bot.tree.command(name="welcome_disable", description="Disable welcome messages")
+async def welcome_disable(interaction: discord.Interaction):
+    if not _feature_admin(interaction):
+        await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True); return
+    _save_feature_config(interaction.guild.id, 'welcome', {'enabled': False})
+    await interaction.response.send_message("✅ Welcome messages disabled.", ephemeral=True)
+
+@bot.tree.command(name="goodbye_setup", description="Configure the server goodbye message")
+@app_commands.describe(channel="Channel for goodbye messages", message="Use {username}, {server}")
+async def goodbye_setup(interaction: discord.Interaction, channel: discord.TextChannel, message: str = "👋 **{username}** has left **{server}**. We wish you well!"):
+    if not _feature_admin(interaction):
+        await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True); return
+    _save_feature_config(interaction.guild.id, 'goodbye', {'enabled': True, 'channel_id': str(channel.id), 'message': message[:2000]})
+    await interaction.response.send_message(f"✅ Goodbye messages enabled in {channel.mention}.", ephemeral=True)
+
+@bot.tree.command(name="goodbye_disable", description="Disable goodbye messages")
+async def goodbye_disable(interaction: discord.Interaction):
+    if not _feature_admin(interaction):
+        await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True); return
+    _save_feature_config(interaction.guild.id, 'goodbye', {'enabled': False})
+    await interaction.response.send_message("✅ Goodbye messages disabled.", ephemeral=True)
+
+@bot.tree.command(name="automod_enable", description="Enable EditH bad-word filtering")
+async def automod_enable(interaction: discord.Interaction):
+    if not _feature_admin(interaction):
+        await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True); return
+    cfg = _feature_config(interaction.guild.id).get('automod', {})
+    _save_feature_config(interaction.guild.id, 'automod', {'enabled': True, 'blocked_words': cfg.get('blocked_words') or _default_blocked_words()})
+    await interaction.response.send_message("🛡️ AutoMod is now enabled.", ephemeral=True)
+
+@bot.tree.command(name="automod_disable", description="Disable EditH bad-word filtering")
+async def automod_disable(interaction: discord.Interaction):
+    if not _feature_admin(interaction):
+        await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True); return
+    _save_feature_config(interaction.guild.id, 'automod', {'enabled': False})
+    await interaction.response.send_message("🛡️ AutoMod disabled.", ephemeral=True)
+
+@bot.tree.command(name="automod_add", description="Add a term to the server AutoMod blocklist")
+async def automod_add(interaction: discord.Interaction, word: str):
+    if not _feature_admin(interaction):
+        await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True); return
+    word = word.strip().casefold()
+    if not word or len(word) > 80:
+        await interaction.response.send_message("❌ Invalid term.", ephemeral=True); return
+    cfg = _feature_config(interaction.guild.id).get('automod', {})
+    words = list(dict.fromkeys((cfg.get('blocked_words') or []) + [word]))
+    _save_feature_config(interaction.guild.id, 'automod', {'blocked_words': words})
+    await interaction.response.send_message("✅ AutoMod term added.", ephemeral=True)
+
+@bot.tree.command(name="automod_remove", description="Remove a term from the server AutoMod blocklist")
+async def automod_remove(interaction: discord.Interaction, word: str):
+    if not _feature_admin(interaction):
+        await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True); return
+    word = word.strip().casefold()
+    cfg = _feature_config(interaction.guild.id).get('automod', {})
+    _save_feature_config(interaction.guild.id, 'automod', {'blocked_words': [x for x in (cfg.get('blocked_words') or []) if x != word]})
+    await interaction.response.send_message("✅ AutoMod term removed.", ephemeral=True)
+
+@bot.tree.command(name="automod_list", description="Show AutoMod status and configured term count")
+async def automod_list(interaction: discord.Interaction):
+    if not _feature_admin(interaction):
+        await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True); return
+    cfg = _feature_config(interaction.guild.id).get('automod', {})
+    await interaction.response.send_message(f"🛡️ AutoMod: {'ON' if cfg.get('enabled') else 'OFF'} • {len(cfg.get('blocked_words') or [])} blocked terms.", ephemeral=True)
+
+@bot.tree.command(name="invites", description="Show tracked invite joins for a member")
+async def invites(interaction: discord.Interaction, member: discord.Member = None):
+    target = member or interaction.user
+    data = firebase_get(f'guilds/{interaction.guild.id}/invite_counts/{target.id}') or {}
+    count = int(data.get('count', 0) or 0) if isinstance(data, dict) else 0
+    await interaction.response.send_message(f"📨 **{target.display_name}** has **{count}** tracked invite join(s).", ephemeral=True)
+
+@bot.tree.command(name="features", description="Show EditH community feature status")
+async def features(interaction: discord.Interaction):
+    cfg = _feature_config(interaction.guild.id)
+    await interaction.response.send_message(
+        f"⚙️ **EditH Features**\nWelcome: {'ON' if cfg['welcome']['enabled'] else 'OFF'}\n"
+        f"Goodbye: {'ON' if cfg['goodbye']['enabled'] else 'OFF'}\n"
+        f"Invite counter: {'ON' if cfg['invites']['enabled'] else 'OFF'}\n"
+        f"AutoMod: {'ON' if cfg['automod']['enabled'] else 'OFF'}", ephemeral=True)
 
 # ============ SLASH COMMANDS ============
 @bot.tree.command(name="setup", description="Setup all systems (Admin only)")
