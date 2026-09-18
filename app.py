@@ -2216,7 +2216,7 @@ def _member_can_admin(member):
     return bool(member and (member.id == getattr(member.guild, 'owner_id', None) or member.guild_permissions.administrator))
 
 def _member_can_moderate(member):
-    return bool(member and (member.guild_permissions.administrator or member.guild_permissions.ban_members or member.guild_permissions.kick_members or member.guild_permissions.moderate_members))
+    return bool(member and (member.guild_permissions.administrator or member.guild_permissions.ban_members or member.guild_permissions.kick_members or member.guild_permissions.moderate_members or member.guild_permissions.manage_messages or member.guild_permissions.manage_channels or member.guild_permissions.manage_roles or member.guild_permissions.manage_nicknames or member.guild_permissions.mute_members or member.guild_permissions.deafen_members or member.guild_permissions.move_members))
 
 def _serialize_member(member):
     return {
@@ -2240,6 +2240,7 @@ def _serialize_guild(guild, actor_id=None):
         'owner_id': str(guild.owner_id) if guild.owner_id else None,
         'is_member': bool(actor), 'is_admin': bool(actor and actor.guild_permissions.administrator),
         'is_owner': bool(actor and actor.id == guild.owner_id),
+        'is_moderator': bool(actor and _member_can_moderate(actor)),
         'permissions': actor.guild_permissions.value if actor else 0,
         'created_at': guild.created_at.isoformat(), 'boost_level': guild.premium_tier,
         'boost_count': guild.premium_subscription_count or 0
@@ -2249,6 +2250,7 @@ async def api_health(request):
     return _api_json({'ok': True, 'status': 'online', 'bot_user': str(bot.user) if bot.user else None, 'guilds': len(bot.guilds)})
 
 async def api_stats(request):
+    if not _api_authorized(request): return _api_json({'error':'unauthorized'},401)
     commands_count = len(bot.tree.get_commands())
     members = set(); humans=0; bots_count=0
     for g in bot.guilds:
@@ -2265,7 +2267,10 @@ async def api_stats(request):
 
 async def api_bot_guilds(request):
     if not _api_authorized(request): return _api_json({'error':'unauthorized'},401)
-    return _api_json({'ok':True,'guilds':[_serialize_guild(g) for g in bot.guilds]})
+    actor_id=str(request.headers.get('X-Actor-ID',''))
+    if not actor_id.isdigit():
+        return _api_json({'ok':True,'guilds':[_serialize_guild(g) for g in bot.guilds]})
+    return _api_json({'ok':True,'guilds':[_serialize_guild(g, actor_id) for g in bot.guilds]})
 
 async def api_user_guilds(request):
     if not _api_authorized(request): return _api_json({'error':'unauthorized'}, 401)
